@@ -8,6 +8,7 @@ cd "${INSTALL_DIR}"
 
 echo "Pulling latest…"
 sudo git pull
+sudo chown -R "$(whoami)" "${INSTALL_DIR}"
 
 if ! diff -q "${INSTALL_DIR}/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.service" >/dev/null 2>&1; then
     echo "Service file changed, updating…"

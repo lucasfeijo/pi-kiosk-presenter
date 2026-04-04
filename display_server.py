@@ -307,20 +307,56 @@ class DisplayManager:
 
     def apply_layout(self, layout: list[dict]):
         """
-        Apply a full layout.  Kills all existing panes, then launches and
-        positions every pane in the list.  Each pane is independent — one
-        failure won't prevent the others from launching.
+        Apply a full layout.  Kills all existing panes, then launches all
+        processes at once and positions windows in background threads so
+        the HTTP response returns immediately.
         """
         with self.lock:
             self._kill_all()
             self._current_layout = layout
+            launched: list[tuple[dict, str, subprocess.Popen, tuple]] = []
             for pane in layout:
                 try:
-                    self._add_pane(pane)
+                    ptype = pane.get("type", "")
+                    name = pane.get("name", ptype)
+                    launcher = self.LAUNCHERS.get(ptype)
+                    if not launcher:
+                        log.warning("Unknown pane type '%s', skipping", ptype)
+                        continue
+                    geom = resolve_region(pane, self.screen_w, self.screen_h)
+                    proc = launcher(self, pane, geom)
+                    self.panes[name] = ManagedPane(name=name, ptype=ptype, proc=proc)
+                    launched.append((pane, name, proc, geom))
                 except Exception:
                     log.exception("Failed to launch pane '%s'",
                                   pane.get("name", pane.get("type", "?")))
             self._save_layout()
+
+        for pane, name, proc, geom in launched:
+            t = Thread(target=self._position_pane, args=(pane, name, proc, geom), daemon=True)
+            t.start()
+
+    def _position_pane(self, pane: dict, name: str, proc: subprocess.Popen, geom: tuple):
+        """Find and position a pane's window (runs in a background thread)."""
+        x, y, w, h = geom
+        wid = find_window_by_pid(proc.pid, retries=10, delay=0.5)
+        if wid is None:
+            wid = find_window_by_name(pane.get("url", name), retries=5, delay=0.5)
+
+        if wid:
+            position_window(wid, x, y, w, h)
+            time.sleep(0.3)
+            position_window(wid, x, y, w, h)
+            subprocess.run(
+                ["xdotool", "set_window", "--name", name, str(wid)],
+                stderr=subprocess.DEVNULL,
+            )
+            with self.lock:
+                if name in self.panes:
+                    self.panes[name].wid = wid
+            log.info("Pane '%s' → wid=%d  geom=%dx%d+%d+%d", name, wid, w, h, x, y)
+        else:
+            log.warning("Pane '%s': could not find X window (pid=%d)", name, proc.pid)
 
     def add_pane(self, pane: dict):
         """Add a single pane without disturbing existing ones."""
@@ -394,6 +430,7 @@ class DisplayManager:
     # -- internals ----------------------------------------------------------
 
     def _add_pane(self, pane: dict):
+        """Launch a single pane and position it (blocking). Used by add_pane and watchdog."""
         ptype = pane.get("type", "")
         name = pane.get("name", ptype)
 
@@ -406,27 +443,10 @@ class DisplayManager:
                 f"Unknown pane type '{ptype}'. Valid: {list(self.LAUNCHERS)}"
             )
 
-        # Resolve geometry FIRST so launchers can use native positioning
-        x, y, w, h = resolve_region(pane, self.screen_w, self.screen_h)
-        proc = launcher(self, pane, (x, y, w, h))
-
-        wid = find_window_by_pid(proc.pid, retries=10, delay=0.5)
-        if wid is None:
-            wid = find_window_by_name(pane.get("url", name), retries=5, delay=0.5)
-
-        if wid:
-            position_window(wid, x, y, w, h)
-            time.sleep(0.3)
-            position_window(wid, x, y, w, h)
-            subprocess.run(
-                ["xdotool", "set_window", "--name", name, str(wid)],
-                stderr=subprocess.DEVNULL,
-            )
-            log.info("Pane '%s' → wid=%d  geom=%dx%d+%d+%d", name, wid, w, h, x, y)
-        else:
-            log.warning("Pane '%s': could not find X window (pid=%d)", name, proc.pid)
-
-        self.panes[name] = ManagedPane(name=name, ptype=ptype, proc=proc, wid=wid)
+        geom = resolve_region(pane, self.screen_w, self.screen_h)
+        proc = launcher(self, pane, geom)
+        self.panes[name] = ManagedPane(name=name, ptype=ptype, proc=proc)
+        self._position_pane(pane, name, proc, geom)
 
     def _watchdog(self):
         """Poll child processes and re-launch any that have exited."""
