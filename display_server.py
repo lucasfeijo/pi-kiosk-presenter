@@ -402,6 +402,30 @@ class DisplayManager:
             self._kill_all()
             self._save_layout()
 
+    @staticmethod
+    def _proc_usage(pid: int) -> dict:
+        """Read CPU% and RSS from /proc for a given pid."""
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                fields = f.read().split()
+            utime = int(fields[13])
+            stime = int(fields[14])
+            starttime = int(fields[21])
+            rss_pages = int(fields[23])
+
+            with open("/proc/uptime") as f:
+                uptime_sec = float(f.read().split()[0])
+
+            hz = os.sysconf("SC_CLK_TCK")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            total_time = (utime + stime) / hz
+            elapsed = uptime_sec - (starttime / hz)
+            cpu_pct = (total_time / elapsed * 100) if elapsed > 0 else 0.0
+            rss_mb = rss_pages * page_size / (1024 * 1024)
+            return {"cpu_pct": round(cpu_pct, 1), "rss_mb": round(rss_mb, 1)}
+        except Exception:
+            return {"cpu_pct": None, "rss_mb": None}
+
     def status(self) -> dict:
         """Return current state."""
         with self.lock:
@@ -413,6 +437,7 @@ class DisplayManager:
                         "pid": mp.proc.pid,
                         "alive": mp.proc.poll() is None,
                         "wid": mp.wid,
+                        **self._proc_usage(mp.proc.pid),
                     }
                     for name, mp in self.panes.items()
                 },
@@ -550,10 +575,13 @@ class Handler(BaseHTTPRequestHandler):
         pane_rows = ""
         for name, info in panes_info.items():
             alive = "alive" if info["alive"] else "dead"
+            cpu = f'{info["cpu_pct"]}%' if info.get("cpu_pct") is not None else "—"
+            mem = f'{info["rss_mb"]} MB' if info.get("rss_mb") is not None else "—"
             pane_rows += (
                 f'<tr><td>{name}</td><td>{info["type"]}</td>'
                 f'<td><span class="badge {alive}">{alive}</span></td>'
-                f'<td>{info["pid"]}</td></tr>\n'
+                f'<td>{info["pid"]}</td>'
+                f'<td>{cpu}</td><td>{mem}</td></tr>\n'
             )
 
         html = f"""<!DOCTYPE html>
@@ -613,8 +641,8 @@ class Handler(BaseHTTPRequestHandler):
   <div class="card">
     <h2>Running Panes</h2>
     <table>
-      <thead><tr><th>Name</th><th>Type</th><th>Status</th><th>PID</th></tr></thead>
-      <tbody>{pane_rows if pane_rows else '<tr><td colspan="4" style="color:#8b949e">No panes running</td></tr>'}</tbody>
+      <thead><tr><th>Name</th><th>Type</th><th>Status</th><th>PID</th><th>CPU</th><th>Mem</th></tr></thead>
+      <tbody>{pane_rows if pane_rows else '<tr><td colspan="6" style="color:#8b949e">No panes running</td></tr>'}</tbody>
     </table>
   </div>
 </div>
