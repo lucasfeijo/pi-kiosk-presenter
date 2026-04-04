@@ -302,7 +302,7 @@ class DisplayManager:
         data_dir = f"/tmp/pi-display-chromium-{name}"
         cmd = [
             "chromium",
-            "--kiosk",
+            f"--app={url}",
             "--noerrdialogs",
             "--disable-infobars",
             "--disable-session-crashed-bubble",
@@ -325,7 +325,6 @@ class DisplayManager:
             f"--window-position={x},{y}",
             f"--window-size={w},{h}",
             f"--user-data-dir={data_dir}",
-            url,
             *extra,
         ]
         log.info("Launching chromium: %s", " ".join(cmd))
