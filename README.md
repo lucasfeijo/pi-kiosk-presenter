@@ -6,31 +6,66 @@ Designed for **Raspberry Pi OS Lite + X11**.
 
 ## Install
 
+On a fresh Pi, run the installer with your repo URL:
+
 ```bash
-# Copy the project folder to your Pi, then:
-cd pi-display-server
-bash install.sh
+bash <(curl -sL https://raw.githubusercontent.com/YOU/pi-display-server/main/install.sh) \
+  https://github.com/YOU/pi-display-server.git
 ```
 
-This installs dependencies (`xdotool`, `mpv`, `chromium-browser`, `feh`, etc.), copies the server to `/opt/pi-display-server`, and sets up a systemd service on port **8686**.
+Or clone first and run locally:
+
+```bash
+git clone https://github.com/YOU/pi-display-server.git /tmp/pi-display-server
+bash /tmp/pi-display-server/install.sh https://github.com/YOU/pi-display-server.git
+```
+
+This clones the repo to `/opt/pi-display-server`, installs all dependencies (X11, openbox, xdotool, mpv, chromium, feh), sets up the systemd service on port **8686**, and creates default `~/.xinitrc` and `~/.bash_profile` for kiosk boot (only if they don't already exist).
 
 ## Prerequisites
 
-Make sure X is running. If you're on Raspberry Pi OS Lite with X started manually:
+- **Raspberry Pi OS Lite** with console autologin enabled (`raspi-config` > System Options > Boot / Auto Login > Console Autologin).
+- The installer handles everything else. If you already have a custom `~/.xinitrc` or `~/.bash_profile`, the installer won't overwrite them.
+
+## Boot Chain
+
+On power-up, the system starts automatically:
+
+1. **getty** auto-logs in the `pi` user on tty1
+2. **`~/.bash_profile`** runs `startx` (only on tty1, only without an existing display)
+3. **`~/.xinitrc`** disables screen blanking, rotates the display, and starts Openbox
+4. **systemd** starts `pi-display-server.service` after `graphical.target`
+5. **`display_server.py`** restores the last saved layout from `layout.json`
+
+No display manager (lightdm) needed.
+
+## Deploying Updates
+
+Push to GitHub, then update the Pi:
 
 ```bash
-# In your .xinitrc or startup script, start a simple window manager:
-exec openbox-session
-# Or just run X bare:
-startx &
-export DISPLAY=:0
+# From your dev machine (one command does both):
+./deploy.sh
+
+# Or just SSH in and run:
+ssh pi@your-pi 'update-display'
 ```
 
-The server needs a running X session and a window manager that respects move/resize hints. `openbox` works perfectly and is lightweight.
+The `update-display` command (installed to `/usr/local/bin/`) does `git pull` + service restart.
+
+Set `PI_HOST` to override the default target:
 
 ```bash
-sudo apt-get install openbox
+PI_HOST=pi@other-pi.local ./deploy.sh
 ```
+
+## Crash Recovery
+
+| What crashes | Who restarts it | How |
+|---|---|---|
+| **display_server.py** | systemd | `Restart=on-failure` with 1s delay. Server reloads `layout.json` and re-creates all panes. Rate-limited to 5 restarts per 60s. |
+| **A child pane** (mpv, chromium, feh) | Watchdog thread | Polls every 10s, re-launches dead panes from the stored layout. |
+| **X11 / Openbox** | getty + bash_profile | Full reset: login re-runs `startx`, systemd restarts the server. |
 
 ## API Reference
 
@@ -219,6 +254,7 @@ Environment variables (set in the systemd service or export before running):
 | `DISPLAY_HOST` | `0.0.0.0` | Bind address |
 | `DISPLAY_PORT` | `8686` | HTTP port |
 | `DISPLAY` | `:0` | X11 display |
+| `WATCHDOG_INTERVAL` | `10` | Seconds between child-process health checks |
 
 ## Logs
 
@@ -231,4 +267,4 @@ journalctl -u pi-display-server -f
 - **Window manager**: Use `openbox` — it's minimal and respects xdotool move/resize without fighting.
 - **Hardware decoding**: Pass `"mpv_args": ["--hwdec=auto"]` for RTSP panes to use the Pi's GPU.
 - **Chromium GPU**: If Chromium is slow, try adding `"chromium_args": ["--enable-gpu-rasterization"]`.
-- **Auto-start X**: Add `startx` to your `.bash_profile` or use a display manager like `lightdm`.
+- **Manual update**: SSH into the Pi and run `update-display` to pull the latest code and restart.

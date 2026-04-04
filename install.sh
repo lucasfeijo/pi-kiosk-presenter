@@ -3,13 +3,23 @@ set -euo pipefail
 
 INSTALL_DIR="/opt/pi-display-server"
 SERVICE_NAME="pi-display-server"
+REPO_URL="${1:-}"
 
 echo "=== Pi Display Server — Installer ==="
 
+if [ -z "${REPO_URL}" ]; then
+    echo "Usage: bash install.sh <git-clone-url>"
+    echo "  e.g. bash install.sh https://github.com/you/pi-display-server.git"
+    exit 1
+fi
+
 # --- Dependencies ----------------------------------------------------------
-echo "[1/4] Installing system dependencies…"
+echo "[1/6] Installing system dependencies…"
 sudo apt-get update -qq
 sudo apt-get install -y -qq \
+    git \
+    xserver-xorg \
+    openbox \
     xdotool \
     x11-utils \
     mpv \
@@ -17,17 +27,25 @@ sudo apt-get install -y -qq \
     feh \
     python3
 
-# --- Copy files ------------------------------------------------------------
-echo "[2/4] Installing server to ${INSTALL_DIR}…"
-sudo mkdir -p "${INSTALL_DIR}"
-sudo cp "$(dirname "$0")/display_server.py" "${INSTALL_DIR}/display_server.py"
-sudo chmod +x "${INSTALL_DIR}/display_server.py"
+# --- Clone repo ------------------------------------------------------------
+echo "[2/6] Cloning repo to ${INSTALL_DIR}…"
+if [ -d "${INSTALL_DIR}/.git" ]; then
+    echo "  Repo already exists, pulling latest…"
+    cd "${INSTALL_DIR}"
+    sudo git pull
+else
+    sudo git clone "${REPO_URL}" "${INSTALL_DIR}"
+fi
+
+# --- Symlink update command ------------------------------------------------
+echo "[3/6] Installing update-display command…"
+sudo chmod +x "${INSTALL_DIR}/update.sh"
+sudo ln -sf "${INSTALL_DIR}/update.sh" /usr/local/bin/update-display
 
 # --- Systemd service -------------------------------------------------------
-echo "[3/4] Installing systemd service…"
-sudo cp "$(dirname "$0")/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.service"
+echo "[4/6] Installing systemd service…"
+sudo cp "${INSTALL_DIR}/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.service"
 
-# Update the User= line to match the current user
 CURRENT_USER="$(whoami)"
 sudo sed -i "s/^User=.*/User=${CURRENT_USER}/" "/etc/systemd/system/${SERVICE_NAME}.service"
 sudo sed -i "s|/home/pi/|/home/${CURRENT_USER}/|g" "/etc/systemd/system/${SERVICE_NAME}.service"
@@ -35,8 +53,37 @@ sudo sed -i "s|/home/pi/|/home/${CURRENT_USER}/|g" "/etc/systemd/system/${SERVIC
 sudo systemctl daemon-reload
 sudo systemctl enable "${SERVICE_NAME}"
 
+# --- Boot files (only if missing) ------------------------------------------
+echo "[5/6] Setting up boot files…"
+
+if [ ! -f "$HOME/.xinitrc" ]; then
+    cat > "$HOME/.xinitrc" << 'XINITRC'
+xset -dpms
+xset s off
+xset s noblank
+
+openbox-session &
+
+xrandr -o right
+XINITRC
+    echo "  Created ~/.xinitrc"
+else
+    echo "  ~/.xinitrc already exists, skipping"
+fi
+
+if [ ! -f "$HOME/.bash_profile" ]; then
+    cat > "$HOME/.bash_profile" << 'BASHPROFILE'
+if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
+  startx
+fi
+BASHPROFILE
+    echo "  Created ~/.bash_profile"
+else
+    echo "  ~/.bash_profile already exists, skipping"
+fi
+
 # --- Start -----------------------------------------------------------------
-echo "[4/4] Starting service…"
+echo "[6/6] Starting service…"
 sudo systemctl start "${SERVICE_NAME}"
 
 echo ""
@@ -49,3 +96,6 @@ echo "Manage with:"
 echo "  sudo systemctl status ${SERVICE_NAME}"
 echo "  sudo systemctl restart ${SERVICE_NAME}"
 echo "  journalctl -u ${SERVICE_NAME} -f"
+echo ""
+echo "To update later:"
+echo "  update-display"

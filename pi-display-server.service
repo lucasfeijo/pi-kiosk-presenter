@@ -2,6 +2,8 @@
 Description=Pi Display Server — remote HDMI layout control
 After=graphical.target
 Wants=graphical.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple

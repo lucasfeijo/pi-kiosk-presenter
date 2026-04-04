@@ -17,7 +17,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Optional
 
 logging.basicConfig(
@@ -27,6 +27,7 @@ logging.basicConfig(
 log = logging.getLogger("display-server")
 
 LAYOUT_FILE = os.environ.get("LAYOUT_FILE", "/opt/pi-display-server/layout.json")
+WATCHDOG_INTERVAL = int(os.environ.get("WATCHDOG_INTERVAL", "10"))
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -215,6 +216,9 @@ class DisplayManager:
         self.lock = Lock()
         self.screen_w, self.screen_h = get_screen_resolution()
         self._current_layout: list[dict] = []
+        self._stop_event = Event()
+        self._watchdog_thread = Thread(target=self._watchdog, daemon=True)
+        self._watchdog_thread.start()
         log.info("Screen resolution: %dx%d", self.screen_w, self.screen_h)
 
     # -- layout persistence -------------------------------------------------
@@ -439,6 +443,28 @@ class DisplayManager:
 
         self.panes[name] = ManagedPane(name=name, ptype=ptype, proc=proc, wid=wid)
 
+    def _watchdog(self):
+        """Poll child processes and re-launch any that have exited."""
+        while not self._stop_event.wait(WATCHDOG_INTERVAL):
+            with self.lock:
+                for pane_def in list(self._current_layout):
+                    name = pane_def.get("name", pane_def.get("type", ""))
+                    mp = self.panes.get(name)
+                    if mp is None or mp.proc.poll() is None:
+                        continue
+                    exit_code = mp.proc.returncode
+                    log.warning(
+                        "Pane '%s' exited (code=%s), restarting…", name, exit_code
+                    )
+                    self.panes.pop(name, None)
+                    try:
+                        self._add_pane(pane_def)
+                    except Exception:
+                        log.exception("Failed to restart pane '%s'", name)
+
+    def stop_watchdog(self):
+        self._stop_event.set()
+
     def _kill_pane(self, name: str):
         mp = self.panes.pop(name, None)
         if mp and mp.proc.poll() is None:
@@ -557,6 +583,7 @@ def main():
     # Graceful shutdown
     def _shutdown(sig, frame):
         log.info("Shutting down…")
+        dm.stop_watchdog()
         dm.clear()
         server.shutdown()
         sys.exit(0)
