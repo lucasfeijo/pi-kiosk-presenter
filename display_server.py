@@ -11,6 +11,7 @@ Requires: Python 3.9+, xdotool, xdpyinfo, mpv, chromium-browser, feh
 import json
 import logging
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -31,7 +32,40 @@ WATCHDOG_INTERVAL = int(os.environ.get("WATCHDOG_INTERVAL", "10"))
 # Raspberry Pi: --hwdec=auto never picks V4L2 (tries Vulkan/VDPAU/VA-API first and
 # falls back to software). Use bcm2835 h264_v4l2m2m via v4l2m2m-copy. Set to
 # "auto" or "no" on other hosts if needed.
+# H.265 / HEVC mains (e.g. Intelbras subtype=0): use per-pane "hwdec": "drm-copy"
+# — v4l2m2m often has no working HEVC device; drm-copy uses the Pi HEVC block.
 MPV_HWDEC = os.environ.get("MPV_HWDEC", "v4l2m2m-copy")
+# Extra low-latency RTSP options (demuxer, no audio, swap interval). Set to 0/false/no to disable.
+MPV_RTSP_FAST = os.environ.get("MPV_RTSP_FAST", "1").lower() not in ("0", "false", "no")
+
+
+def _mpv_rtsp_perf_args(pane: dict) -> list[str]:
+    """Small cache, fast probe, optional no-audio — tuned for live DVR / RTSP."""
+    args: list[str] = []
+    transport = (pane.get("rtsp_transport") or os.environ.get("MPV_RTSP_TRANSPORT", "")).strip().lower()
+    if transport in ("tcp", "udp"):
+        args.append(f"--demuxer-lavf-o=rtsp_transport={transport}")
+    if not MPV_RTSP_FAST:
+        extra = os.environ.get("MPV_EXTRA_ARGS", "").strip()
+        if extra:
+            args.extend(shlex.split(extra))
+        return args
+    if not pane.get("audio"):
+        args.append("--no-audio")
+    args.extend(
+        [
+            "--cache=no",
+            "--demuxer-lavf-analyzeduration=0",
+            "--demuxer-lavf-probesize=32768",
+            "--demuxer-lavf-o=fflags=+nobuffer",
+            "--opengl-swapinterval=0",
+        ]
+    )
+    extra = os.environ.get("MPV_EXTRA_ARGS", "").strip()
+    if extra:
+        args.extend(shlex.split(extra))
+    return args
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -228,6 +262,7 @@ class DisplayManager:
             aspect_args = ["--keepaspect=no"]
 
         name = pane.get("name", "rtsp")
+        hwdec = pane.get("hwdec") or MPV_HWDEC
         cmd = [
             "mpv",
             f"--title={name}",
@@ -237,11 +272,12 @@ class DisplayManager:
             "--force-window=yes",
             "--no-border",
             "--no-keepaspect-window",
-            f"--hwdec={MPV_HWDEC}",
+            f"--hwdec={hwdec}",
             f"--geometry={w}x{h}+{x}+{y}",
             f"--autofit={w}x{h}",
             *aspect_args,
             "--profile=low-latency",
+            *_mpv_rtsp_perf_args(pane),
             url,
             *extra,
         ]
@@ -603,6 +639,7 @@ details textarea{{width:100%;min-height:160px;margin-top:8px;background:#0d1117;
   border:1px solid #30363d;border-radius:6px;padding:10px;font-family:"SF Mono",Consolas,monospace;
   font-size:12px;resize:vertical;tab-size:2}}
 .info-line{{color:#8b949e;font-size:12px;margin-bottom:10px}}
+label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight:normal}}
 </style></head><body>
 <h1>Pi Display Server</h1>
 <div class="top">
@@ -647,6 +684,23 @@ details textarea{{width:100%;min-height:160px;margin-top:8px;background:#0d1117;
     <select id="p-fit" onchange="updateProp('fit',this.value)">
       <option value="fill">fill</option><option value="cover">cover</option><option value="contain">contain</option>
     </select>
+    <div id="rtsp-extra" style="display:none">
+    <label title="Pi: v4l2m2m-copy for H.264 subs; drm-copy for H.265 mains">hwdec</label>
+    <select id="p-hwdec" onchange="updateHwdec(this.value)">
+      <option value="">(server default)</option>
+      <option value="v4l2m2m-copy">v4l2m2m-copy (H.264)</option>
+      <option value="drm-copy">drm-copy (H.265 / HEVC)</option>
+      <option value="no">no (software)</option>
+      <option value="auto">auto</option>
+    </select>
+    <label>RTSP transport</label>
+    <select id="p-rtsp-t" onchange="updateRtspTransport(this.value)">
+      <option value="">(default)</option>
+      <option value="tcp">tcp</option>
+      <option value="udp">udp (faster LAN)</option>
+    </select>
+    <label class="inline"><input type="checkbox" id="p-audio" onchange="updateAudio(this.checked)"> Decode audio</label>
+    </div>
     <div class="coords">
       <div><label>X</label><input id="p-x" type="number" step="0.01" min="0" max="1" onchange="updateCoord('x',this.value)"></div>
       <div><label>Y</label><input id="p-y" type="number" step="0.01" min="0" max="1" onchange="updateCoord('y',this.value)"></div>
@@ -735,6 +789,11 @@ function showProps() {{
   document.getElementById("p-type").value = p.type || "rtsp";
   document.getElementById("p-url").value = p.url || p.path || p.cmd || "";
   document.getElementById("p-fit").value = p.fit || "fill";
+  const rtspEx = document.getElementById("rtsp-extra");
+  rtspEx.style.display = (p.type === "rtsp" || p.type === "stream") ? "block" : "none";
+  document.getElementById("p-hwdec").value = p.hwdec || "";
+  document.getElementById("p-rtsp-t").value = p.rtsp_transport || "";
+  document.getElementById("p-audio").checked = !!p.audio;
   document.getElementById("p-x").value = round(p.x || 0);
   document.getElementById("p-y").value = round(p.y || 0);
   document.getElementById("p-w").value = round(p.w || 1);
@@ -755,6 +814,27 @@ function updateUrlProp(val) {{
   if (t === "image") p.path = val;
   else if (t === "command") p.cmd = val;
   else p.url = val;
+  syncJson();
+}}
+
+function updateHwdec(val) {{
+  if (selectedIdx < 0) return;
+  const p = layout[selectedIdx];
+  if (val) p.hwdec = val; else delete p.hwdec;
+  syncJson();
+}}
+
+function updateRtspTransport(val) {{
+  if (selectedIdx < 0) return;
+  const p = layout[selectedIdx];
+  if (val) p.rtsp_transport = val; else delete p.rtsp_transport;
+  syncJson();
+}}
+
+function updateAudio(checked) {{
+  if (selectedIdx < 0) return;
+  const p = layout[selectedIdx];
+  if (checked) p.audio = true; else delete p.audio;
   syncJson();
 }}
 

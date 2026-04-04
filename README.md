@@ -241,9 +241,26 @@ curl -X POST http://pi:8686/pane \
     "type": "rtsp",
     "url": "rtsp://192.168.1.100/stream",
     "x": 0, "y": 0, "w": 1.0, "h": 1.0,
-    "mpv_args": ["--hwdec=auto", "--vo=gpu"]
+    "mpv_args": ["--framedrop=yes"]
   }'
 ```
+
+### RTSP speed and codecs (e.g. Intelbras DVR)
+
+| DVR setting | Typical codec | On Raspberry Pi use |
+|-------------|---------------|---------------------|
+| Stream principal (`subtype=0`) | H.265 / HEVC | Per-pane `"hwdec": "drm-copy"` (or set `MPV_HWDEC=drm-copy` if *all* panes are HEVC) |
+| Stream extra (`subtype=1`) | H.264 | Default `MPV_HWDEC=v4l2m2m-copy` |
+
+For a **multi‑camera grid**, prefer **`subtype=1`** URLs when the small resolution is acceptable: less bandwidth and reliable **hardware** H.264 decode. Use the main stream only where you need full resolution.
+
+Optional pane fields:
+
+| Field | Purpose |
+|-------|---------|
+| `hwdec` | Overrides global `MPV_HWDEC` for that pane (`drm-copy`, `v4l2m2m-copy`, `no`, …). |
+| `rtsp_transport` | `tcp` or `udp` (UDP can reduce latency on a wired LAN). |
+| `audio` | Set `true` if you need sound; default skips audio for lower CPU use. |
 
 ## Configuration
 
@@ -255,6 +272,10 @@ Environment variables (set in the systemd service or export before running):
 | `DISPLAY_PORT` | `8686` | HTTP port |
 | `DISPLAY` | `:0` | X11 display |
 | `WATCHDOG_INTERVAL` | `10` | Seconds between child-process health checks |
+| `MPV_HWDEC` | `v4l2m2m-copy` | Default hardware decode for RTSP (Pi H.264). Use `drm-copy` if every pane is HEVC. |
+| `MPV_RTSP_FAST` | `1` | Low-latency RTSP tweaks (`cache=no`, small probe, no audio unless `audio: true`, `opengl-swapinterval=0`). Set `0` to disable. |
+| `MPV_RTSP_TRANSPORT` | *(unset)* | Optional default `tcp` or `udp` for all RTSP panes (per-pane `rtsp_transport` overrides). |
+| `MPV_EXTRA_ARGS` | *(unset)* | Extra mpv arguments (shell-split) appended to every RTSP launch. |
 
 ## Logs
 
@@ -265,6 +286,6 @@ journalctl -u pi-display-server -f
 ## Tips
 
 - **Window manager**: Use `openbox` — it's minimal and respects xdotool move/resize without fighting.
-- **Hardware decoding**: Pass `"mpv_args": ["--hwdec=auto"]` for RTSP panes to use the Pi's GPU.
+- **Hardware decoding on Pi**: Do not use `--hwdec=auto` for RTSP; it usually falls back to software. Use `v4l2m2m-copy` for H.264 and `drm-copy` for H.265 mains (see table above or the web UI **hwdec** field).
 - **Chromium GPU**: If Chromium is slow, try adding `"chromium_args": ["--enable-gpu-rasterization"]`.
 - **Manual update**: SSH into the Pi and run `update-display` to pull the latest code and restart.
