@@ -229,6 +229,7 @@ class DisplayManager:
             "--no-input-default-bindings",
             "--force-window=yes",
             "--no-border",
+            "--hwdec=auto",
             f"--geometry={w}x{h}+{x}+{y}",
             f"--autofit={w}x{h}",
             *aspect_args,
