@@ -642,10 +642,12 @@ const preview = document.getElementById("preview");
 
 function initPreview() {{
   const maxW = preview.parentElement.clientWidth - 2;
-  const scale = maxW / SCREEN_W;
-  const h = Math.round(SCREEN_H * scale);
-  preview.style.width = maxW + "px";
-  preview.style.height = h + "px";
+  const maxH = window.innerHeight - preview.getBoundingClientRect().top - 80;
+  const scaleW = maxW / SCREEN_W;
+  const scaleH = maxH / SCREEN_H;
+  const scale = Math.min(scaleW, scaleH > 0 ? scaleH : scaleW);
+  preview.style.width = Math.round(SCREEN_W * scale) + "px";
+  preview.style.height = Math.round(SCREEN_H * scale) + "px";
   preview.dataset.scale = scale;
   document.getElementById("screen-info").textContent =
     "Screen: " + SCREEN_W + " \\u00d7 " + SCREEN_H + " px";
