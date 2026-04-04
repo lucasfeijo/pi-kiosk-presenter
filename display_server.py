@@ -122,75 +122,14 @@ def position_window(wid: int, x: int, y: int, w: int, h: int):
 
 
 # ---------------------------------------------------------------------------
-# Pane / Region helpers
+# Positioning
 # ---------------------------------------------------------------------------
-#
-# The screen is divided into a 2-column × 4-row grid, numbered 1–8:
-#
-#   | 1 | 2 |
-#   | 3 | 4 |
-#   | 5 | 6 |
-#   | 7 | 8 |
-#
-# "region" accepts a comma-separated list of cell numbers.
-# The bounding box of all listed cells becomes the window area.
-#
-# Examples:
-#   "1"       → top-left cell
-#   "1,2"     → full top row
-#   "5,7"     → left column, bottom two rows (tall pane)
-#   "1,3,5,7" → entire left column
-#   "1,2,3,4,5,6,7,8" → fullscreen
-#
-
-GRID_COLS = 2
-GRID_ROWS = 4
-
-def _cell_to_colrow(cell: int) -> tuple[int, int]:
-    """Convert 1-based cell number to (col, row), both 0-based."""
-    if cell < 1 or cell > GRID_COLS * GRID_ROWS:
-        raise ValueError(
-            f"Cell {cell} out of range. Valid: 1–{GRID_COLS * GRID_ROWS}"
-        )
-    idx = cell - 1
-    row = idx // GRID_COLS
-    col = idx % GRID_COLS
-    return col, row
-
 
 def resolve_region(pane: dict, sw: int, sh: int) -> tuple[int, int, int, int]:
     """
     Return (x, y, w, h) in pixels for a pane definition.
-
-    Supports either:
-      - "region": "5,7" (comma-separated cell numbers, bounding box)
-      - "region": "3"   (single cell)
-      - "x", "y", "w", "h" as floats 0.0–1.0 or absolute pixels
+    Values can be floats 0.0–1.0 (fractions of screen) or absolute pixels.
     """
-    if "region" in pane:
-        raw = str(pane["region"])
-        cells = [int(c.strip()) for c in raw.split(",")]
-
-        cols = []
-        rows = []
-        for cell in cells:
-            c, r = _cell_to_colrow(cell)
-            cols.append(c)
-            rows.append(r)
-
-        min_col, max_col = min(cols), max(cols)
-        min_row, max_row = min(rows), max(rows)
-
-        cell_w = sw / GRID_COLS
-        cell_h = sh / GRID_ROWS
-
-        x = int(min_col * cell_w)
-        y = int(min_row * cell_h)
-        w = int((max_col - min_col + 1) * cell_w)
-        h = int((max_row - min_row + 1) * cell_h)
-        return x, y, w, h
-
-    # Manual coordinates
     def to_px(val, total):
         if isinstance(val, float) and 0.0 <= val <= 1.0:
             return int(val * total)
@@ -449,7 +388,6 @@ class DisplayManager:
                     }
                     for name, mp in self.panes.items()
                 },
-                "grid": f"{GRID_COLS}x{GRID_ROWS} (cells 1–{GRID_COLS * GRID_ROWS})",
             }
 
     # -- internals ----------------------------------------------------------
@@ -577,121 +515,373 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve_index(self):
         layout_json = json.dumps(dm._current_layout, indent=2)
-        status = dm.status()
-        panes_info = status["panes"]
-        screen = status["screen"]
-
-        pane_rows = ""
-        for name, info in panes_info.items():
-            alive = "alive" if info["alive"] else "dead"
-            cpu = f'{info["cpu_pct"]}%' if info.get("cpu_pct") is not None else "—"
-            mem = f'{info["rss_mb"]} MB' if info.get("rss_mb") is not None else "—"
-            pane_rows += (
-                f'<tr><td>{name}</td><td>{info["type"]}</td>'
-                f'<td><span class="badge {alive}">{alive}</span></td>'
-                f'<td>{info["pid"]}</td>'
-                f'<td>{cpu}</td><td>{mem}</td></tr>\n'
-            )
+        status_data = dm.status()
+        screen = status_data["screen"]
+        status_json = json.dumps(status_data)
 
         html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
+<html lang="en"><head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pi Display Server</title>
 <style>
-  *, *::before, *::after {{ box-sizing: border-box; }}
-  body {{ font-family: -apple-system, system-ui, sans-serif; margin: 0;
-         padding: 24px; background: #0d1117; color: #e6edf3; }}
-  h1 {{ font-size: 1.4rem; margin: 0 0 20px; color: #58a6ff; }}
-  .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }}
-  @media (max-width: 800px) {{ .grid {{ grid-template-columns: 1fr; }} }}
-  .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px;
-           padding: 16px; }}
-  .card h2 {{ font-size: 1rem; margin: 0 0 12px; color: #8b949e; }}
-  textarea {{ width: 100%; min-height: 320px; background: #0d1117;
-             color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
-             padding: 12px; font-family: "SF Mono", Consolas, monospace;
-             font-size: 13px; resize: vertical; tab-size: 2; }}
-  textarea:focus {{ outline: none; border-color: #58a6ff; }}
-  .actions {{ display: flex; gap: 8px; margin-top: 12px; }}
-  button {{ padding: 8px 16px; border: none; border-radius: 6px;
-           font-size: 14px; font-weight: 500; cursor: pointer; }}
-  .btn-primary {{ background: #238636; color: #fff; }}
-  .btn-primary:hover {{ background: #2ea043; }}
-  .btn-danger {{ background: #da3633; color: #fff; }}
-  .btn-danger:hover {{ background: #e5534b; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
-  th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid #21262d; }}
-  th {{ color: #8b949e; font-weight: 500; }}
-  .badge {{ padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }}
-  .badge.alive {{ background: #238636; color: #fff; }}
-  .badge.dead {{ background: #da3633; color: #fff; }}
-  .info {{ color: #8b949e; font-size: 13px; margin-bottom: 12px; }}
-  #result {{ margin-top: 12px; padding: 10px; border-radius: 6px;
-            font-size: 13px; display: none; }}
-  #result.ok {{ display: block; background: #0f2d1a; border: 1px solid #238636; color: #3fb950; }}
-  #result.err {{ display: block; background: #2d0f0f; border: 1px solid #da3633; color: #f85149; }}
-</style>
-</head>
-<body>
+*,*::before,*::after{{box-sizing:border-box}}
+body{{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:20px;background:#0d1117;color:#e6edf3}}
+h1{{font-size:1.3rem;margin:0 0 16px;color:#58a6ff}}
+.top{{display:flex;gap:16px;align-items:flex-start}}
+@media(max-width:900px){{.top{{flex-direction:column}}}}
+.preview-wrap{{flex:1;min-width:0}}
+.sidebar{{width:280px;flex-shrink:0}}
+.card{{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;margin-bottom:16px}}
+.card h2{{font-size:.85rem;margin:0 0 10px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}}
+#preview{{position:relative;background:#010409;border:1px solid #30363d;border-radius:6px;overflow:hidden;cursor:default}}
+.pane-rect{{position:absolute;border:2px solid #58a6ff;border-radius:3px;cursor:move;
+  display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;
+  color:#e6edf3;text-shadow:0 1px 2px #000;user-select:none;background:rgba(88,166,255,.08)}}
+.pane-rect.selected{{border-color:#f0883e;background:rgba(240,136,62,.12);z-index:10}}
+.pane-rect .handle{{position:absolute;width:10px;height:10px;background:#58a6ff;border-radius:2px;cursor:nwse-resize}}
+.pane-rect.selected .handle{{background:#f0883e}}
+.pane-rect .handle.br{{right:-1px;bottom:-1px;cursor:nwse-resize}}
+.pane-rect .handle.bl{{left:-1px;bottom:-1px;cursor:nesw-resize}}
+.pane-rect .handle.tr{{right:-1px;top:-1px;cursor:nesw-resize}}
+.pane-rect .handle.tl{{left:-1px;top:-1px;cursor:nwse-resize}}
+.pane-item{{padding:6px 8px;border-radius:4px;cursor:pointer;font-size:13px;margin-bottom:4px;
+  border:1px solid transparent;display:flex;justify-content:space-between;align-items:center}}
+.pane-item:hover{{background:#21262d}}
+.pane-item.selected{{border-color:#f0883e;background:#21262d}}
+.pane-item .type{{color:#8b949e;font-size:11px}}
+label{{display:block;font-size:12px;color:#8b949e;margin:8px 0 3px}}
+input,select{{width:100%;padding:6px 8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;
+  border-radius:4px;font-size:13px;font-family:inherit}}
+input:focus,select:focus{{outline:none;border-color:#58a6ff}}
+.coords{{display:grid;grid-template-columns:1fr 1fr;gap:6px}}
+.actions{{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}}
+button{{padding:7px 14px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer}}
+.btn-primary{{background:#238636;color:#fff}}.btn-primary:hover{{background:#2ea043}}
+.btn-danger{{background:#da3633;color:#fff}}.btn-danger:hover{{background:#e5534b}}
+.btn-secondary{{background:#30363d;color:#e6edf3}}.btn-secondary:hover{{background:#3d444d}}
+.btn-sm{{padding:4px 10px;font-size:12px}}
+table{{width:100%;border-collapse:collapse;font-size:13px}}
+th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid #21262d}}
+th{{color:#8b949e;font-weight:500}}
+.badge{{padding:2px 7px;border-radius:10px;font-size:11px;font-weight:600}}
+.badge.alive{{background:#238636;color:#fff}}.badge.dead{{background:#da3633;color:#fff}}
+#result{{margin-top:10px;padding:8px 12px;border-radius:6px;font-size:13px;display:none}}
+#result.ok{{display:block;background:#0f2d1a;border:1px solid #238636;color:#3fb950}}
+#result.err{{display:block;background:#2d0f0f;border:1px solid #da3633;color:#f85149}}
+details{{margin-top:16px}} summary{{cursor:pointer;color:#8b949e;font-size:13px}}
+details textarea{{width:100%;min-height:160px;margin-top:8px;background:#0d1117;color:#e6edf3;
+  border:1px solid #30363d;border-radius:6px;padding:10px;font-family:"SF Mono",Consolas,monospace;
+  font-size:12px;resize:vertical;tab-size:2}}
+.info-line{{color:#8b949e;font-size:12px;margin-bottom:10px}}
+</style></head><body>
 <h1>Pi Display Server</h1>
-<div class="grid">
+<div class="top">
+<div class="preview-wrap">
   <div class="card">
-    <h2>Layout</h2>
-    <p class="info">Screen: {screen["width"]}x{screen["height"]} &middot; Grid: {status["grid"]}</p>
-    <textarea id="layout">{layout_json}</textarea>
+    <h2>Screen Preview</h2>
+    <p class="info-line" id="screen-info"></p>
+    <div id="preview"></div>
     <div class="actions">
       <button class="btn-primary" onclick="applyLayout()">Apply Layout</button>
       <button class="btn-danger" onclick="clearAll()">Clear All</button>
+      <button class="btn-secondary" onclick="addPane()">+ Add Pane</button>
     </div>
     <div id="result"></div>
+    <details><summary>Raw JSON</summary>
+      <textarea id="raw-json"></textarea>
+      <div class="actions"><button class="btn-secondary btn-sm" onclick="loadFromJson()">Load from JSON</button></div>
+    </details>
   </div>
   <div class="card">
     <h2>Running Panes</h2>
-    <table>
-      <thead><tr><th>Name</th><th>Type</th><th>Status</th><th>PID</th><th>CPU</th><th>Mem</th></tr></thead>
-      <tbody>{pane_rows if pane_rows else '<tr><td colspan="6" style="color:#8b949e">No panes running</td></tr>'}</tbody>
-    </table>
+    <table><thead><tr><th>Name</th><th>Type</th><th>Status</th><th>PID</th><th>CPU</th><th>Mem</th></tr></thead>
+    <tbody id="proc-table"></tbody></table>
   </div>
 </div>
+<div class="sidebar">
+  <div class="card">
+    <h2>Panes</h2>
+    <div id="pane-list"></div>
+    <button class="btn-secondary btn-sm" style="width:100%;margin-top:8px" onclick="addPane()">+ Add Pane</button>
+  </div>
+  <div class="card" id="props-card" style="display:none">
+    <h2>Properties</h2>
+    <label>Name</label><input id="p-name" oninput="updateProp('name',this.value)">
+    <label>Type</label>
+    <select id="p-type" onchange="updateProp('type',this.value)">
+      <option value="rtsp">rtsp</option><option value="web">web</option>
+      <option value="image">image</option><option value="command">command</option>
+    </select>
+    <label>URL / Path</label><input id="p-url" oninput="updateUrlProp(this.value)">
+    <label>Fit (rtsp only)</label>
+    <select id="p-fit" onchange="updateProp('fit',this.value)">
+      <option value="fill">fill</option><option value="cover">cover</option><option value="contain">contain</option>
+    </select>
+    <div class="coords">
+      <div><label>X</label><input id="p-x" type="number" step="0.01" min="0" max="1" onchange="updateCoord('x',this.value)"></div>
+      <div><label>Y</label><input id="p-y" type="number" step="0.01" min="0" max="1" onchange="updateCoord('y',this.value)"></div>
+      <div><label>W</label><input id="p-w" type="number" step="0.01" min="0.02" max="1" onchange="updateCoord('w',this.value)"></div>
+      <div><label>H</label><input id="p-h" type="number" step="0.01" min="0.02" max="1" onchange="updateCoord('h',this.value)"></div>
+    </div>
+    <div class="actions">
+      <button class="btn-danger btn-sm" onclick="deleteSelected()">Delete Pane</button>
+    </div>
+  </div>
+</div>
+</div>
 <script>
+const SCREEN_W = {screen["width"]};
+const SCREEN_H = {screen["height"]};
+let layout = {layout_json};
+let statusData = {status_json};
+let selectedIdx = -1;
+let dragState = null;
+
+const preview = document.getElementById("preview");
+
+function initPreview() {{
+  const maxW = preview.parentElement.clientWidth - 2;
+  const scale = maxW / SCREEN_W;
+  const h = Math.round(SCREEN_H * scale);
+  preview.style.width = maxW + "px";
+  preview.style.height = h + "px";
+  preview.dataset.scale = scale;
+  document.getElementById("screen-info").textContent =
+    "Screen: " + SCREEN_W + " \\u00d7 " + SCREEN_H + " px";
+}}
+
+function render() {{
+  const scale = parseFloat(preview.dataset.scale);
+  preview.querySelectorAll(".pane-rect").forEach(e => e.remove());
+  layout.forEach((p, i) => {{
+    const el = document.createElement("div");
+    el.className = "pane-rect" + (i === selectedIdx ? " selected" : "");
+    const x = (p.x || 0), y = (p.y || 0), w = (p.w || 1), h = (p.h || 1);
+    el.style.left = (x * SCREEN_W * scale) + "px";
+    el.style.top = (y * SCREEN_H * scale) + "px";
+    el.style.width = (w * SCREEN_W * scale) + "px";
+    el.style.height = (h * SCREEN_H * scale) + "px";
+    el.textContent = p.name || p.type || "?";
+    el.dataset.idx = i;
+    el.onmousedown = (e) => startDrag(e, i, "move");
+    ["br","bl","tr","tl"].forEach(corner => {{
+      const hdl = document.createElement("div");
+      hdl.className = "handle " + corner;
+      hdl.onmousedown = (e) => {{ e.stopPropagation(); startDrag(e, i, corner); }};
+      el.appendChild(hdl);
+    }});
+    preview.appendChild(el);
+  }});
+  renderList();
+  syncJson();
+}}
+
+function renderList() {{
+  const list = document.getElementById("pane-list");
+  list.innerHTML = "";
+  layout.forEach((p, i) => {{
+    const el = document.createElement("div");
+    el.className = "pane-item" + (i === selectedIdx ? " selected" : "");
+    el.innerHTML = '<span>' + (p.name || "unnamed") + '</span><span class="type">' + (p.type || "?") + '</span>';
+    el.onclick = () => select(i);
+    list.appendChild(el);
+  }});
+  showProps();
+}}
+
+function select(i) {{
+  selectedIdx = i;
+  render();
+}}
+
+function showProps() {{
+  const card = document.getElementById("props-card");
+  if (selectedIdx < 0 || selectedIdx >= layout.length) {{ card.style.display = "none"; return; }}
+  card.style.display = "block";
+  const p = layout[selectedIdx];
+  document.getElementById("p-name").value = p.name || "";
+  document.getElementById("p-type").value = p.type || "rtsp";
+  document.getElementById("p-url").value = p.url || p.path || p.cmd || "";
+  document.getElementById("p-fit").value = p.fit || "fill";
+  document.getElementById("p-x").value = round(p.x || 0);
+  document.getElementById("p-y").value = round(p.y || 0);
+  document.getElementById("p-w").value = round(p.w || 1);
+  document.getElementById("p-h").value = round(p.h || 1);
+}}
+
+function updateProp(key, val) {{
+  if (selectedIdx < 0) return;
+  layout[selectedIdx][key] = val;
+  render();
+}}
+
+function updateUrlProp(val) {{
+  if (selectedIdx < 0) return;
+  const p = layout[selectedIdx];
+  delete p.url; delete p.path; delete p.cmd;
+  const t = p.type || "rtsp";
+  if (t === "image") p.path = val;
+  else if (t === "command") p.cmd = val;
+  else p.url = val;
+  syncJson();
+}}
+
+function updateCoord(key, val) {{
+  if (selectedIdx < 0) return;
+  layout[selectedIdx][key] = parseFloat(val) || 0;
+  render();
+}}
+
+function round(v) {{ return Math.round(v * 100) / 100; }}
+
+function startDrag(e, idx, mode) {{
+  e.preventDefault();
+  select(idx);
+  const scale = parseFloat(preview.dataset.scale);
+  const rect = preview.getBoundingClientRect();
+  const p = layout[idx];
+  dragState = {{
+    idx, mode, startMX: e.clientX, startMY: e.clientY,
+    origX: p.x || 0, origY: p.y || 0, origW: p.w || 1, origH: p.h || 1,
+    scale, rect
+  }};
+  document.addEventListener("mousemove", onDrag);
+  document.addEventListener("mouseup", onDragEnd);
+}}
+
+function onDrag(e) {{
+  if (!dragState) return;
+  const s = dragState, p = layout[s.idx];
+  const dx = (e.clientX - s.startMX) / (s.scale * SCREEN_W);
+  const dy = (e.clientY - s.startMY) / (s.scale * SCREEN_H);
+  const minSz = 0.02;
+
+  if (s.mode === "move") {{
+    p.x = round(Math.max(0, Math.min(1 - (p.w || 1), s.origX + dx)));
+    p.y = round(Math.max(0, Math.min(1 - (p.h || 1), s.origY + dy)));
+  }} else if (s.mode === "br") {{
+    p.w = round(Math.max(minSz, Math.min(1 - s.origX, s.origW + dx)));
+    p.h = round(Math.max(minSz, Math.min(1 - s.origY, s.origH + dy)));
+  }} else if (s.mode === "bl") {{
+    const newW = Math.max(minSz, s.origW - dx);
+    p.x = round(Math.max(0, s.origX + s.origW - newW));
+    p.w = round(newW);
+    p.h = round(Math.max(minSz, Math.min(1 - s.origY, s.origH + dy)));
+  }} else if (s.mode === "tr") {{
+    p.w = round(Math.max(minSz, Math.min(1 - s.origX, s.origW + dx)));
+    const newH = Math.max(minSz, s.origH - dy);
+    p.y = round(Math.max(0, s.origY + s.origH - newH));
+    p.h = round(newH);
+  }} else if (s.mode === "tl") {{
+    const newW = Math.max(minSz, s.origW - dx);
+    const newH = Math.max(minSz, s.origH - dy);
+    p.x = round(Math.max(0, s.origX + s.origW - newW));
+    p.y = round(Math.max(0, s.origY + s.origH - newH));
+    p.w = round(newW);
+    p.h = round(newH);
+  }}
+  render();
+}}
+
+function onDragEnd() {{
+  dragState = null;
+  document.removeEventListener("mousemove", onDrag);
+  document.removeEventListener("mouseup", onDragEnd);
+}}
+
+function addPane() {{
+  layout.push({{ name: "pane" + (layout.length + 1), type: "web", url: "https://example.com", x: 0.0, y: 0.0, w: 0.5, h: 0.5 }});
+  select(layout.length - 1);
+}}
+
+function deleteSelected() {{
+  if (selectedIdx < 0) return;
+  layout.splice(selectedIdx, 1);
+  selectedIdx = -1;
+  render();
+}}
+
+function syncJson() {{
+  document.getElementById("raw-json").value = JSON.stringify(layout, null, 2);
+}}
+
+function loadFromJson() {{
+  try {{
+    layout = JSON.parse(document.getElementById("raw-json").value);
+    selectedIdx = -1;
+    render();
+    showResult(true, "Loaded from JSON");
+  }} catch(e) {{ showResult(false, e.message); }}
+}}
+
 function showResult(ok, msg) {{
   const el = document.getElementById("result");
   el.textContent = msg;
   el.className = ok ? "ok" : "err";
+  setTimeout(() => el.className = "", 3000);
 }}
+
 async function applyLayout() {{
   try {{
-    const text = document.getElementById("layout").value;
-    JSON.parse(text);
     const res = await fetch("/layout", {{
       method: "POST",
       headers: {{"Content-Type": "application/json"}},
-      body: text,
+      body: JSON.stringify(layout),
     }});
     const data = await res.json();
     if (res.ok) {{
+      statusData = data;
       showResult(true, "Applied — " + Object.keys(data.panes || {{}}).length + " panes");
-      setTimeout(() => location.reload(), 1000);
-    }} else {{
-      showResult(false, data.error || "Unknown error");
-    }}
-  }} catch (e) {{
-    showResult(false, e.message);
-  }}
+      setTimeout(refreshStatus, 2000);
+    }} else showResult(false, data.error || "Error");
+  }} catch(e) {{ showResult(false, e.message); }}
 }}
+
 async function clearAll() {{
   if (!confirm("Kill all panes?")) return;
   const res = await fetch("/clear", {{ method: "POST" }});
   if (res.ok) {{
+    layout = [];
+    selectedIdx = -1;
+    render();
     showResult(true, "Cleared");
-    setTimeout(() => location.reload(), 500);
+    setTimeout(refreshStatus, 500);
   }}
 }}
-</script>
-</body>
-</html>"""
+
+async function refreshStatus() {{
+  try {{
+    const res = await fetch("/status");
+    statusData = await res.json();
+    renderProcTable();
+  }} catch(e) {{}}
+}}
+
+function renderProcTable() {{
+  const tb = document.getElementById("proc-table");
+  const panes = statusData.panes || {{}};
+  const names = Object.keys(panes);
+  if (!names.length) {{
+    tb.innerHTML = '<tr><td colspan="6" style="color:#8b949e">No panes running</td></tr>';
+    return;
+  }}
+  tb.innerHTML = names.map(n => {{
+    const p = panes[n];
+    const alive = p.alive ? "alive" : "dead";
+    const cpu = p.cpu_pct != null ? p.cpu_pct + "%" : "\\u2014";
+    const mem = p.rss_mb != null ? p.rss_mb + " MB" : "\\u2014";
+    return '<tr><td>' + n + '</td><td>' + p.type + '</td>' +
+      '<td><span class="badge ' + alive + '">' + alive + '</span></td>' +
+      '<td>' + p.pid + '</td><td>' + cpu + '</td><td>' + mem + '</td></tr>';
+  }}).join("");
+}}
+
+window.addEventListener("resize", () => {{ initPreview(); render(); }});
+initPreview();
+render();
+renderProcTable();
+</script></body></html>"""
         self._send_html(html)
 
     # --- POST --------------------------------------------------------------

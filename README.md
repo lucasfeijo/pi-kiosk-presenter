@@ -96,13 +96,13 @@ curl -X POST http://pi:8686/layout \
       "name": "camera",
       "type": "rtsp",
       "url": "rtsp://192.168.1.100:554/stream",
-      "region": "bottom"
+      "x": 0, "y": 0.5, "w": 1.0, "h": 0.5
     },
     {
       "name": "dashboard",
       "type": "web",
       "url": "http://grafana.local:3000/dashboard",
-      "region": "top"
+      "x": 0, "y": 0, "w": 1.0, "h": 0.5
     }
   ]'
 ```
@@ -112,14 +112,14 @@ curl -X POST http://pi:8686/layout \
 Add or replace a single pane without disturbing existing ones.
 
 ```bash
-# Add a webcam feed to the top-right corner
+# Add a webcam feed to the top-right quarter
 curl -X POST http://pi:8686/pane \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "webcam",
     "type": "rtsp",
     "url": "rtsp://192.168.1.50/live",
-    "region": "top-right"
+    "x": 0.5, "y": 0, "w": 0.5, "h": 0.5
   }'
 ```
 
@@ -148,27 +148,27 @@ curl -X POST http://pi:8686/clear
 | `image` | — | Shows an image via `feh` | `path` |
 | `command` | — | Runs any command that creates an X window | `cmd` |
 
-## Regions (Positioning)
+## Visual Layout Editor
 
-Every pane needs a position. Use a **named region** or **manual coordinates**.
+Open `http://<pi-ip>:8686/` in a browser to use the visual editor:
 
-### Named regions
+- **Screen preview** — drag panes to move them, drag corner handles to resize
+- **Sidebar** — click a pane to edit its properties (name, type, URL, fit mode)
+- **Apply Layout** — pushes the layout to the Pi and restarts all panes
+- **Raw JSON** — expand the collapsible section at the bottom for direct JSON editing
 
-| Region | Position |
-|--------|----------|
-| `full` | Entire screen |
-| `top` | Top half |
-| `bottom` | Bottom half |
-| `left` | Left half |
-| `right` | Right half |
-| `top-left` | Top-left quarter |
-| `top-right` | Top-right quarter |
-| `bottom-left` | Bottom-left quarter |
-| `bottom-right` | Bottom-right quarter |
+## Positioning
 
-### Manual coordinates
+Every pane needs `x`, `y`, `w`, `h` values as fractions (0.0–1.0) of the screen:
 
-Use fractional (0.0–1.0) or absolute pixel values:
+| Field | Description | Default |
+|-------|-------------|---------|
+| `x` | Left edge (0.0 = left, 1.0 = right) | `0` |
+| `y` | Top edge (0.0 = top, 1.0 = bottom) | `0` |
+| `w` | Width (0.0–1.0) | `1.0` (full width) |
+| `h` | Height (0.0–1.0) | `1.0` (full height) |
+
+Absolute pixel values also work.
 
 ```json
 {
@@ -184,16 +184,16 @@ Use fractional (0.0–1.0) or absolute pixel values:
 
 ## Examples
 
-### Security camera dashboard (2×2 grid)
+### Security camera dashboard (2x2 grid)
 
 ```bash
 curl -X POST http://pi:8686/layout \
   -H 'Content-Type: application/json' \
   -d '[
-    {"name": "cam1", "type": "rtsp", "url": "rtsp://192.168.1.101/stream", "region": "top-left"},
-    {"name": "cam2", "type": "rtsp", "url": "rtsp://192.168.1.102/stream", "region": "top-right"},
-    {"name": "cam3", "type": "rtsp", "url": "rtsp://192.168.1.103/stream", "region": "bottom-left"},
-    {"name": "cam4", "type": "rtsp", "url": "rtsp://192.168.1.104/stream", "region": "bottom-right"}
+    {"name": "cam1", "type": "rtsp", "url": "rtsp://192.168.1.101/stream", "x":0, "y":0, "w":0.5, "h":0.5},
+    {"name": "cam2", "type": "rtsp", "url": "rtsp://192.168.1.102/stream", "x":0.5, "y":0, "w":0.5, "h":0.5},
+    {"name": "cam3", "type": "rtsp", "url": "rtsp://192.168.1.103/stream", "x":0, "y":0.5, "w":0.5, "h":0.5},
+    {"name": "cam4", "type": "rtsp", "url": "rtsp://192.168.1.104/stream", "x":0.5, "y":0.5, "w":0.5, "h":0.5}
   ]'
 ```
 
@@ -203,8 +203,8 @@ curl -X POST http://pi:8686/layout \
 curl -X POST http://pi:8686/layout \
   -H 'Content-Type: application/json' \
   -d '[
-    {"name": "grafana", "type": "web", "url": "http://grafana.local:3000", "region": "top"},
-    {"name": "front-door", "type": "rtsp", "url": "rtsp://192.168.1.100:554/live", "region": "bottom"}
+    {"name": "grafana", "type": "web", "url": "http://grafana.local:3000", "x":0, "y":0, "w":1.0, "h":0.5},
+    {"name": "front-door", "type": "rtsp", "url": "rtsp://192.168.1.100:554/live", "x":0, "y":0.5, "w":1.0, "h":0.5}
   ]'
 ```
 
@@ -214,7 +214,7 @@ curl -X POST http://pi:8686/layout \
 curl -X POST http://pi:8686/layout \
   -H 'Content-Type: application/json' \
   -d '[
-    {"name": "kiosk", "type": "web", "url": "https://news.ycombinator.com", "region": "full"}
+    {"name": "kiosk", "type": "web", "url": "https://news.ycombinator.com", "x":0, "y":0, "w":1.0, "h":1.0}
   ]'
 ```
 
@@ -227,7 +227,7 @@ curl -X POST http://pi:8686/pane \
     "name": "vlc",
     "type": "command",
     "cmd": "vlc --no-video-title-show rtsp://192.168.1.100/stream",
-    "region": "bottom"
+    "x": 0, "y": 0.5, "w": 1.0, "h": 0.5
   }'
 ```
 
@@ -240,7 +240,7 @@ curl -X POST http://pi:8686/pane \
     "name": "camera",
     "type": "rtsp",
     "url": "rtsp://192.168.1.100/stream",
-    "region": "full",
+    "x": 0, "y": 0, "w": 1.0, "h": 1.0,
     "mpv_args": ["--hwdec=auto", "--vo=gpu"]
   }'
 ```
