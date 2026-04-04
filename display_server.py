@@ -131,9 +131,12 @@ def resolve_region(pane: dict, sw: int, sh: int) -> tuple[int, int, int, int]:
     Values can be floats 0.0–1.0 (fractions of screen) or absolute pixels.
     """
     def to_px(val, total):
-        if isinstance(val, float) and 0.0 <= val <= 1.0:
-            return int(val * total)
-        return int(val)
+        v = float(val)
+        if 0.0 < v <= 1.0:
+            return int(v * total)
+        if v == 0.0:
+            return 0
+        return int(v)
 
     return (
         to_px(pane.get("x", 0), sw),
