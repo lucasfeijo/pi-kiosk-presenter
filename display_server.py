@@ -147,6 +147,31 @@ def find_window_by_name(name: str, retries: int = 30, delay: float = 0.5) -> Opt
     return None
 
 
+def _pane_stack_sort_key(pane: dict, index: int) -> tuple[int, int]:
+    """Sort key for stacking: lower (order, index) = further back; higher = on top."""
+    raw = pane.get("order", pane.get("z"))
+    try:
+        o = int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        o = 0
+    return (o, index)
+
+
+def raise_window_stack(layout: list[dict], panes: dict[str, "ManagedPane"]):
+    """Raise each mapped window in stack order (last raised ends on top)."""
+    indexed = list(enumerate(layout))
+    indexed.sort(key=lambda iv: _pane_stack_sort_key(iv[1], iv[0]))
+    for _, pane in indexed:
+        name = pane.get("name", pane.get("type", ""))
+        mp = panes.get(name)
+        wid = mp.wid if mp and mp.wid else None
+        if wid:
+            subprocess.run(
+                ["xdotool", "windowraise", str(wid)],
+                stderr=subprocess.DEVNULL,
+            )
+
+
 def position_window(wid: int, x: int, y: int, w: int, h: int):
     """Move and resize a window by its X window id."""
     # Remove any maximized / fullscreen state first so resize works
@@ -397,9 +422,23 @@ class DisplayManager:
                                   pane.get("name", pane.get("type", "?")))
             self._save_layout()
 
-        for pane, name, proc, geom in launched:
-            t = Thread(target=self._position_pane, args=(pane, name, proc, geom), daemon=True)
-            t.start()
+        def position_all_then_stack():
+            threads = [
+                Thread(
+                    target=self._position_pane,
+                    args=(pane, name, proc, geom),
+                    daemon=True,
+                )
+                for pane, name, proc, geom in launched
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=120)
+            with self.lock:
+                raise_window_stack(layout, self.panes)
+
+        Thread(target=position_all_then_stack, daemon=True).start()
 
     def _position_pane(self, pane: dict, name: str, proc: subprocess.Popen, geom: tuple):
         """Find and position a pane's window (runs in a background thread)."""
@@ -512,6 +551,7 @@ class DisplayManager:
         proc = launcher(self, pane, geom)
         self.panes[name] = ManagedPane(name=name, ptype=ptype, proc=proc)
         self._position_pane(pane, name, proc, geom)
+        raise_window_stack(self._current_layout, self.panes)
 
     def _watchdog(self):
         """Poll child processes and re-launch any that have exited."""
@@ -722,6 +762,8 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
     </select>
     <label class="inline"><input type="checkbox" id="p-audio" onchange="updateAudio(this.checked)"> Decode audio</label>
     </div>
+    <label title="Higher value draws on top when panes overlap">Stack order</label>
+    <input id="p-order" type="number" step="1" onchange="updateOrder(this.value)">
     <div class="coords">
       <div><label>X</label><input id="p-x" type="number" step="0.01" min="0" max="1" onchange="updateCoord('x',this.value)"></div>
       <div><label>Y</label><input id="p-y" type="number" step="0.01" min="0" max="1" onchange="updateCoord('y',this.value)"></div>
@@ -768,6 +810,8 @@ function render() {{
     el.style.top = (y * SCREEN_H * scale) + "px";
     el.style.width = (w * SCREEN_W * scale) + "px";
     el.style.height = (h * SCREEN_H * scale) + "px";
+    const ord = (p.order != null && p.order !== "") ? Number(p.order) : 0;
+    el.style.zIndex = String(ord * 1000 + i + 1);
     el.textContent = p.name || p.type || "?";
     el.dataset.idx = i;
     el.onmousedown = (e) => startDrag(e, i, "move");
@@ -819,6 +863,7 @@ function showProps() {{
   document.getElementById("p-y").value = round(p.y || 0);
   document.getElementById("p-w").value = round(p.w || 1);
   document.getElementById("p-h").value = round(p.h || 1);
+  document.getElementById("p-order").value = (p.order != null && p.order !== "") ? p.order : 0;
 }}
 
 function updateProp(key, val) {{
@@ -863,6 +908,16 @@ function updateCoord(key, val) {{
   if (selectedIdx < 0) return;
   layout[selectedIdx][key] = parseFloat(val) || 0;
   render();
+}}
+
+function updateOrder(val) {{
+  if (selectedIdx < 0) return;
+  const p = layout[selectedIdx];
+  const n = parseInt(val, 10);
+  if (val === "" || Number.isNaN(n)) delete p.order;
+  else p.order = n;
+  render();
+  syncJson();
 }}
 
 function round(v) {{ return Math.round(v * 100) / 100; }}
