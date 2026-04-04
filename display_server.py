@@ -33,16 +33,24 @@ WATCHDOG_INTERVAL = int(os.environ.get("WATCHDOG_INTERVAL", "10"))
 # Helpers
 # ---------------------------------------------------------------------------
 
-def get_screen_resolution() -> tuple[int, int]:
-    """Return (width, height) of the current X display."""
-    out = subprocess.check_output(["xdpyinfo"], text=True)
-    for line in out.splitlines():
-        if "dimensions:" in line:
-            # e.g. "  dimensions:    1920x1080 pixels ..."
-            dims = line.split()[1]  # "1920x1080"
-            w, h = dims.split("x")
-            return int(w), int(h)
-    raise RuntimeError("Could not determine screen resolution from xdpyinfo")
+def get_screen_resolution(retries: int = 30, delay: float = 2.0) -> tuple[int, int]:
+    """Return (width, height) of the current X display, waiting for X if needed."""
+    for attempt in range(retries):
+        try:
+            out = subprocess.check_output(
+                ["xdpyinfo"], text=True, stderr=subprocess.DEVNULL
+            )
+            for line in out.splitlines():
+                if "dimensions:" in line:
+                    dims = line.split()[1]  # "1920x1080"
+                    w, h = dims.split("x")
+                    return int(w), int(h)
+        except subprocess.CalledProcessError:
+            pass
+        if attempt < retries - 1:
+            log.info("Waiting for X display… (attempt %d/%d)", attempt + 1, retries)
+            time.sleep(delay)
+    raise RuntimeError("Could not connect to X display after %d attempts" % retries)
 
 
 def find_window_by_pid(pid: int, retries: int = 30, delay: float = 0.5) -> Optional[int]:

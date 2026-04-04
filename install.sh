@@ -61,10 +61,9 @@ if [ ! -f "$HOME/.xinitrc" ]; then
 xset -dpms
 xset s off
 xset s noblank
-
-openbox-session &
-
 xrandr -o right
+
+exec openbox-session
 XINITRC
     echo "  Created ~/.xinitrc"
 else

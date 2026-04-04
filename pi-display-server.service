@@ -1,7 +1,6 @@
 [Unit]
 Description=Pi Display Server — remote HDMI layout control
-After=graphical.target
-Wants=graphical.target
+After=multi-user.target
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
@@ -19,4 +18,4 @@ KillMode=mixed
 KillSignal=SIGTERM
 
 [Install]
-WantedBy=graphical.target
+WantedBy=multi-user.target
