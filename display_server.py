@@ -281,8 +281,10 @@ class DisplayManager:
             log.warning("Unknown fit mode '%s', defaulting to fill", fit)
             aspect_args = ["--keepaspect=no"]
 
+        name = pane.get("name", "rtsp")
         cmd = [
             "mpv",
+            f"--title={name}",
             "--no-terminal",
             "--no-osc",
             "--no-input-default-bindings",
@@ -338,7 +340,8 @@ class DisplayManager:
     def _launch_image(self, pane: dict, geom: tuple[int, int, int, int]) -> subprocess.Popen:
         path = pane["path"]
         x, y, w, h = geom
-        cmd = ["feh", "--scale-down", "--auto-zoom", "--borderless",
+        name = pane.get("name", "image")
+        cmd = ["feh", f"--title={name}", "--scale-down", "--auto-zoom", "--borderless",
                f"--geometry={w}x{h}+{x}+{y}", path]
         log.info("Launching feh: %s", " ".join(cmd))
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -473,10 +476,13 @@ class DisplayManager:
             wid = find_window_by_name(pane.get("url", name), retries=5, delay=0.5)
 
         if wid:
-            # Position twice with a gap — some WMs/apps override the first one
             position_window(wid, x, y, w, h)
             time.sleep(0.3)
             position_window(wid, x, y, w, h)
+            subprocess.run(
+                ["xdotool", "set_window", "--name", name, str(wid)],
+                stderr=subprocess.DEVNULL,
+            )
             log.info("Pane '%s' → wid=%d  geom=%dx%d+%d+%d", name, wid, w, h, x, y)
         else:
             log.warning("Pane '%s': could not find X window (pid=%d)", name, proc.pid)
