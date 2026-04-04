@@ -63,6 +63,8 @@ xset s off
 xset s noblank
 xrandr -o right
 
+sudo systemctl restart pi-display-server &
+
 exec openbox-session
 XINITRC
     echo "  Created ~/.xinitrc"

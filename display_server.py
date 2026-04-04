@@ -365,13 +365,18 @@ class DisplayManager:
     def apply_layout(self, layout: list[dict]):
         """
         Apply a full layout.  Kills all existing panes, then launches and
-        positions every pane in the list.
+        positions every pane in the list.  Each pane is independent — one
+        failure won't prevent the others from launching.
         """
         with self.lock:
             self._kill_all()
             self._current_layout = layout
             for pane in layout:
-                self._add_pane(pane)
+                try:
+                    self._add_pane(pane)
+                except Exception:
+                    log.exception("Failed to launch pane '%s'",
+                                  pane.get("name", pane.get("type", "?")))
             self._save_layout()
 
     def add_pane(self, pane: dict):
@@ -463,11 +468,9 @@ class DisplayManager:
         x, y, w, h = resolve_region(pane, self.screen_w, self.screen_h)
         proc = launcher(self, pane, (x, y, w, h))
 
-        # Find the window and force-position it with xdotool as a backup
-        wid = find_window_by_pid(proc.pid)
+        wid = find_window_by_pid(proc.pid, retries=10, delay=0.5)
         if wid is None:
-            # Fallback: search by window name for chromium --app mode
-            wid = find_window_by_name(pane.get("url", name))
+            wid = find_window_by_name(pane.get("url", name), retries=5, delay=0.5)
 
         if wid:
             # Position twice with a gap — some WMs/apps override the first one
