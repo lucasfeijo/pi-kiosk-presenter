@@ -28,6 +28,10 @@ log = logging.getLogger("display-server")
 
 LAYOUT_FILE = os.environ.get("LAYOUT_FILE", "/opt/pi-display-server/layout.json")
 WATCHDOG_INTERVAL = int(os.environ.get("WATCHDOG_INTERVAL", "10"))
+# Raspberry Pi: --hwdec=auto never picks V4L2 (tries Vulkan/VDPAU/VA-API first and
+# falls back to software). Use bcm2835 h264_v4l2m2m via v4l2m2m-copy. Set to
+# "auto" or "no" on other hosts if needed.
+MPV_HWDEC = os.environ.get("MPV_HWDEC", "v4l2m2m-copy")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -233,7 +237,7 @@ class DisplayManager:
             "--force-window=yes",
             "--no-border",
             "--no-keepaspect-window",
-            "--hwdec=auto",
+            f"--hwdec={MPV_HWDEC}",
             f"--geometry={w}x{h}+{x}+{y}",
             f"--autofit={w}x{h}",
             *aspect_args,
