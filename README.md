@@ -276,6 +276,7 @@ Environment variables (set in the systemd service or export before running):
 | `MPV_RTSP_FAST` | `1` | Low-latency RTSP tweaks (`cache=no`, small probe, no audio unless `audio: true`, `opengl-swapinterval=0`). Set `0` to disable. |
 | `MPV_RTSP_TRANSPORT` | *(unset)* | Optional default `tcp` or `udp` for all RTSP panes (per-pane `rtsp_transport` overrides). |
 | `MPV_EXTRA_ARGS` | *(unset)* | Extra mpv arguments (shell-split) appended to every RTSP launch. |
+| `CHROMIUM_USER_DATA_ROOT` | `~/.local/share/pi-display-server/chromium` | Parent directory for Chromium profiles (one subfolder per web pane **name**). Survives reboot; set to an absolute path if you want profiles on another disk. |
 
 ## Logs
 
@@ -287,5 +288,6 @@ journalctl -u pi-display-server -f
 
 - **Window manager**: Use `openbox` — it's minimal and respects xdotool move/resize without fighting.
 - **Hardware decoding on Pi**: Do not use `--hwdec=auto` for RTSP; it usually falls back to software. Use `v4l2m2m-copy` for H.264 and `drm-copy` for H.265 mains (see table above or the web UI **hwdec** field).
+- **Chromium logins**: Web panes store cookies under `CHROMIUM_USER_DATA_ROOT/<pane name>/` (not `/tmp`), so sessions persist across reboots. Renaming a pane uses a new folder (fresh login). To carry over an old profile: `mkdir -p ~/.local/share/pi-display-server/chromium` then `mv /tmp/pi-display-chromium-'PaneName' ~/.local/share/pi-display-server/chromium/'PaneName'` (match the pane **name** exactly).
 - **Chromium GPU**: If Chromium is slow, try adding `"chromium_args": ["--enable-gpu-rasterization"]`.
 - **Manual update**: SSH into the Pi and run `update-display` to pull the latest code and restart.

@@ -37,6 +37,27 @@ WATCHDOG_INTERVAL = int(os.environ.get("WATCHDOG_INTERVAL", "10"))
 MPV_HWDEC = os.environ.get("MPV_HWDEC", "v4l2m2m-copy")
 # Extra low-latency RTSP options (demuxer, no audio, swap interval). Set to 0/false/no to disable.
 MPV_RTSP_FAST = os.environ.get("MPV_RTSP_FAST", "1").lower() not in ("0", "false", "no")
+# Chromium profiles (cookies, logins): persist under this directory per pane name.
+# Override with CHROMIUM_USER_DATA_ROOT=/path (e.g. on a larger SD partition).
+_DEFAULT_CHROMIUM_ROOT = os.path.join(
+    os.path.expanduser("~"), ".local/share/pi-display-server/chromium"
+)
+CHROMIUM_USER_DATA_ROOT = os.environ.get(
+    "CHROMIUM_USER_DATA_ROOT", _DEFAULT_CHROMIUM_ROOT
+)
+
+
+def _chromium_user_data_dir(pane: dict) -> str:
+    """Per-web-pane profile directory — persistent (not /tmp) so sessions survive reboot."""
+    name = pane.get("name", "web") or "web"
+    safe = name.replace(os.sep, "_").replace("\x00", "").strip() or "web"
+    root = os.path.expanduser(CHROMIUM_USER_DATA_ROOT.strip() or _DEFAULT_CHROMIUM_ROOT)
+    path = os.path.join(root, safe)
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+    except OSError as e:
+        log.warning("Could not create chromium profile dir %s: %s", path, e)
+    return path
 
 
 def _mpv_rtsp_perf_args(pane: dict) -> list[str]:
@@ -290,7 +311,7 @@ class DisplayManager:
         x, y, w, h = geom
         # Each web pane gets its own user-data-dir so multiple instances work
         name = pane.get("name", "web")
-        data_dir = f"/tmp/pi-display-chromium-{name}"
+        data_dir = _chromium_user_data_dir(pane)
         cmd = [
             "chromium",
             f"--app={url}",
