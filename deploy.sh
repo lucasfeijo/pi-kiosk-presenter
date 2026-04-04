@@ -9,9 +9,14 @@ echo "Pushing to git…"
 git push
 
 echo "Updating Pi (${PI_HOST})…"
-ssh "${PI_HOST}" "
+ssh "${PI_HOST}" "set -e
   if [ ! -d ${REMOTE_DIR}/.git ]; then
     echo 'First deploy: converting to git-managed install…'
+    if ! command -v git >/dev/null 2>&1; then
+      echo 'Installing git…'
+      sudo apt-get update -qq
+      sudo apt-get install -y -qq git
+    fi
     sudo rm -rf ${REMOTE_DIR}
     sudo git clone ${REPO_URL} ${REMOTE_DIR}
     sudo chmod +x ${REMOTE_DIR}/update.sh
