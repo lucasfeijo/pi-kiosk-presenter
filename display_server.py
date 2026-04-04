@@ -269,7 +269,12 @@ class DisplayManager:
         if fit == "fill":
             aspect_args = ["--keepaspect=no"]
         elif fit == "cover":
-            aspect_args = ["--keepaspect=yes", "--panscan=1.0"]
+            aspect_args = [
+                "--keepaspect=yes",
+                "--panscan=1.0",
+                "--video-align-x=0",
+                "--video-align-y=0",
+            ]
         elif fit == "contain":
             aspect_args = ["--keepaspect=yes"]
         else:
