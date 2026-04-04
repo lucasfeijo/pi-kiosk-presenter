@@ -17,7 +17,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Event, Lock, Thread
+from threading import Event, Lock, RLock, Thread
 from typing import Optional
 
 logging.basicConfig(
@@ -160,7 +160,7 @@ class DisplayManager:
 
     def __init__(self):
         self.panes: dict[str, ManagedPane] = {}
-        self.lock = Lock()
+        self.lock = RLock()
         self.screen_w, self.screen_h = get_screen_resolution()
         self._current_layout: list[dict] = []
         self._stop_event = Event()
@@ -229,6 +229,7 @@ class DisplayManager:
             "--no-input-default-bindings",
             "--force-window=yes",
             "--no-border",
+            "--no-keepaspect-window",
             "--hwdec=auto",
             f"--geometry={w}x{h}+{x}+{y}",
             f"--autofit={w}x{h}",
@@ -339,9 +340,9 @@ class DisplayManager:
     def _position_pane(self, pane: dict, name: str, proc: subprocess.Popen, geom: tuple):
         """Find and position a pane's window (runs in a background thread)."""
         x, y, w, h = geom
-        wid = find_window_by_pid(proc.pid, retries=10, delay=0.5)
+        wid = find_window_by_name(name, retries=10, delay=0.5)
         if wid is None:
-            wid = find_window_by_name(pane.get("url", name), retries=5, delay=0.5)
+            wid = find_window_by_pid(proc.pid, retries=5, delay=0.5)
 
         if wid:
             position_window(wid, x, y, w, h)
