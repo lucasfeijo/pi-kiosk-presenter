@@ -596,7 +596,7 @@ def main():
     def _shutdown(sig, frame):
         log.info("Shutting down…")
         dm.stop_watchdog()
-        dm.clear()
+        dm._kill_all()
         server.shutdown()
         sys.exit(0)
 
