@@ -516,6 +516,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_html(self, html: str, code: int = 200):
+        body = html.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _read_json(self) -> dict | list:
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length)
@@ -524,12 +532,130 @@ class Handler(BaseHTTPRequestHandler):
     # --- GET ---------------------------------------------------------------
 
     def do_GET(self):
-        if self.path == "/status":
+        if self.path == "/":
+            self._serve_index()
+        elif self.path == "/status":
             self._send_json(dm.status())
         elif self.path == "/health":
             self._send_json({"ok": True})
         else:
             self._send_json({"error": "Not found"}, 404)
+
+    def _serve_index(self):
+        layout_json = json.dumps(dm._current_layout, indent=2)
+        status = dm.status()
+        panes_info = status["panes"]
+        screen = status["screen"]
+
+        pane_rows = ""
+        for name, info in panes_info.items():
+            alive = "alive" if info["alive"] else "dead"
+            pane_rows += (
+                f'<tr><td>{name}</td><td>{info["type"]}</td>'
+                f'<td><span class="badge {alive}">{alive}</span></td>'
+                f'<td>{info["pid"]}</td></tr>\n'
+            )
+
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pi Display Server</title>
+<style>
+  *, *::before, *::after {{ box-sizing: border-box; }}
+  body {{ font-family: -apple-system, system-ui, sans-serif; margin: 0;
+         padding: 24px; background: #0d1117; color: #e6edf3; }}
+  h1 {{ font-size: 1.4rem; margin: 0 0 20px; color: #58a6ff; }}
+  .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }}
+  @media (max-width: 800px) {{ .grid {{ grid-template-columns: 1fr; }} }}
+  .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+           padding: 16px; }}
+  .card h2 {{ font-size: 1rem; margin: 0 0 12px; color: #8b949e; }}
+  textarea {{ width: 100%; min-height: 320px; background: #0d1117;
+             color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
+             padding: 12px; font-family: "SF Mono", Consolas, monospace;
+             font-size: 13px; resize: vertical; tab-size: 2; }}
+  textarea:focus {{ outline: none; border-color: #58a6ff; }}
+  .actions {{ display: flex; gap: 8px; margin-top: 12px; }}
+  button {{ padding: 8px 16px; border: none; border-radius: 6px;
+           font-size: 14px; font-weight: 500; cursor: pointer; }}
+  .btn-primary {{ background: #238636; color: #fff; }}
+  .btn-primary:hover {{ background: #2ea043; }}
+  .btn-danger {{ background: #da3633; color: #fff; }}
+  .btn-danger:hover {{ background: #e5534b; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
+  th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid #21262d; }}
+  th {{ color: #8b949e; font-weight: 500; }}
+  .badge {{ padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }}
+  .badge.alive {{ background: #238636; color: #fff; }}
+  .badge.dead {{ background: #da3633; color: #fff; }}
+  .info {{ color: #8b949e; font-size: 13px; margin-bottom: 12px; }}
+  #result {{ margin-top: 12px; padding: 10px; border-radius: 6px;
+            font-size: 13px; display: none; }}
+  #result.ok {{ display: block; background: #0f2d1a; border: 1px solid #238636; color: #3fb950; }}
+  #result.err {{ display: block; background: #2d0f0f; border: 1px solid #da3633; color: #f85149; }}
+</style>
+</head>
+<body>
+<h1>Pi Display Server</h1>
+<div class="grid">
+  <div class="card">
+    <h2>Layout</h2>
+    <p class="info">Screen: {screen["width"]}x{screen["height"]} &middot; Grid: {status["grid"]}</p>
+    <textarea id="layout">{layout_json}</textarea>
+    <div class="actions">
+      <button class="btn-primary" onclick="applyLayout()">Apply Layout</button>
+      <button class="btn-danger" onclick="clearAll()">Clear All</button>
+    </div>
+    <div id="result"></div>
+  </div>
+  <div class="card">
+    <h2>Running Panes</h2>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Status</th><th>PID</th></tr></thead>
+      <tbody>{pane_rows if pane_rows else '<tr><td colspan="4" style="color:#8b949e">No panes running</td></tr>'}</tbody>
+    </table>
+  </div>
+</div>
+<script>
+function showResult(ok, msg) {{
+  const el = document.getElementById("result");
+  el.textContent = msg;
+  el.className = ok ? "ok" : "err";
+}}
+async function applyLayout() {{
+  try {{
+    const text = document.getElementById("layout").value;
+    JSON.parse(text);
+    const res = await fetch("/layout", {{
+      method: "POST",
+      headers: {{"Content-Type": "application/json"}},
+      body: text,
+    }});
+    const data = await res.json();
+    if (res.ok) {{
+      showResult(true, "Applied — " + Object.keys(data.panes || {{}}).length + " panes");
+      setTimeout(() => location.reload(), 1000);
+    }} else {{
+      showResult(false, data.error || "Unknown error");
+    }}
+  }} catch (e) {{
+    showResult(false, e.message);
+  }}
+}}
+async function clearAll() {{
+  if (!confirm("Kill all panes?")) return;
+  const res = await fetch("/clear", {{ method: "POST" }});
+  if (res.ok) {{
+    showResult(true, "Cleared");
+    setTimeout(() => location.reload(), 500);
+  }}
+}}
+</script>
+</body>
+</html>"""
+        self._send_html(html)
 
     # --- POST --------------------------------------------------------------
 
