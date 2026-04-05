@@ -336,10 +336,6 @@ class DisplayManager:
 
         name = pane.get("name", "rtsp")
         hwdec = pane.get("hwdec") or MPV_HWDEC
-        # drm-copy does HW decode but copies pixels through RAM — expensive for
-        # large HEVC frames.  Upgrade to zero-copy "drm" automatically.
-        if hwdec == "drm-copy":
-            hwdec = "drm"
         cmd = [
             "mpv",
             f"--title={name}",
