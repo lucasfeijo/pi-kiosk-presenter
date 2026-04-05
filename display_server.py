@@ -495,7 +495,7 @@ class DisplayManager:
             except (TypeError, ValueError):
                 auto_refresh = 0
             if auto_refresh > 0 and pane.get("type") in ("web", "browser"):
-                self._start_auto_refresh(name, auto_refresh)
+                self._start_auto_refresh(name, pane, auto_refresh)
         else:
             log.warning("Pane '%s': could not find X window (pid=%d)", name, proc.pid)
 
@@ -612,8 +612,8 @@ class DisplayManager:
     def stop_watchdog(self):
         self._stop_event.set()
 
-    def _start_auto_refresh(self, name: str, interval_min: float):
-        """Start a background thread that refreshes the pane's window after *interval_min* idle minutes."""
+    def _start_auto_refresh(self, name: str, pane_def: dict, interval_min: float):
+        """Start a background thread that restarts the pane after *interval_min* idle minutes."""
         mp = self.panes.get(name)
         if not mp or not mp.wid or interval_min <= 0:
             return
@@ -622,12 +622,18 @@ class DisplayManager:
         stop = Event()
         mp._refresh_stop = stop
         last_activity = time.time()
-        wid = mp.wid
         interval_sec = interval_min * 60
 
         def _loop():
             nonlocal last_activity
             while not stop.wait(2):
+                cur_mp = self.panes.get(name)
+                if not cur_mp or stop.is_set():
+                    break
+                wid = cur_mp.wid
+                if not wid:
+                    continue
+
                 try:
                     out = subprocess.check_output(
                         ["xdotool", "getactivewindow"],
@@ -639,17 +645,25 @@ class DisplayManager:
                     pass
 
                 if time.time() - last_activity >= interval_sec:
-                    log.info("Auto-refreshing pane '%s' (idle %.0fs)", name, time.time() - last_activity)
-                    subprocess.run(
-                        ["xdotool", "key", "--window", str(wid), "F5"],
-                        stderr=subprocess.DEVNULL,
-                    )
-                    last_activity = time.time()
+                    log.info("Auto-refreshing pane '%s' (idle %.0fs) — full restart",
+                             name, time.time() - last_activity)
+                    stop.set()
+                    # Clear our own thread refs so _kill_pane won't try to join us
+                    with self.lock:
+                        cur = self.panes.get(name)
+                        if cur:
+                            cur._refresh_stop = None
+                            cur._refresh_thread = None
+                        try:
+                            self._add_pane(pane_def)
+                        except Exception:
+                            log.exception("Auto-refresh: failed to restart pane '%s'", name)
+                    break
 
         t = Thread(target=_loop, daemon=True, name=f"auto-refresh-{name}")
         mp._refresh_thread = t
         t.start()
-        log.info("Auto-refresh started for '%s': every %.1f min", name, interval_min)
+        log.info("Auto-refresh started for '%s': every %.1f min (full restart)", name, interval_min)
 
     def _stop_auto_refresh(self, name: str):
         """Stop the auto-refresh thread for a pane, if running."""
