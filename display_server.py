@@ -60,8 +60,20 @@ def _chromium_user_data_dir(pane: dict) -> str:
     return path
 
 
+def _is_hevc_pane(pane: dict) -> bool:
+    """Best-effort guess: the pane carries an H.265/HEVC stream."""
+    hwdec = (pane.get("hwdec") or "").lower()
+    if hwdec in ("drm-copy", "drm"):
+        return True
+    url = (pane.get("url") or "").lower()
+    # Intelbras/Dahua subtype=0 is always the main (H.265) stream
+    if "subtype=0" in url:
+        return True
+    return False
+
+
 def _mpv_rtsp_perf_args(pane: dict) -> list[str]:
-    """Small cache, fast probe, optional no-audio — tuned for live DVR / RTSP."""
+    """Low-latency RTSP args — relaxed for H.265 streams that lack PTS."""
     args: list[str] = []
     transport = (pane.get("rtsp_transport") or os.environ.get("MPV_RTSP_TRANSPORT", "")).strip().lower()
     if transport in ("tcp", "udp"):
@@ -73,15 +85,33 @@ def _mpv_rtsp_perf_args(pane: dict) -> list[str]:
         return args
     if not pane.get("audio"):
         args.append("--no-audio")
-    args.extend(
-        [
-            "--cache=no",
-            "--demuxer-lavf-analyzeduration=0",
-            "--demuxer-lavf-probesize=32768",
-            "--demuxer-lavf-o=fflags=+nobuffer",
-            "--opengl-swapinterval=0",
-        ]
-    )
+
+    hevc = _is_hevc_pane(pane)
+    if hevc:
+        # H.265 main streams often have no PTS — need a small cache and
+        # enough probesize for the demuxer to find HEVC parameter sets.
+        args.extend(
+            [
+                "--cache=yes",
+                "--demuxer-max-bytes=512KiB",
+                "--demuxer-readahead-secs=0.5",
+                "--demuxer-lavf-analyzeduration=1",
+                "--demuxer-lavf-probesize=524288",
+                "--opengl-swapinterval=0",
+                "--fps=25",
+                "--untimed=no",
+            ]
+        )
+    else:
+        args.extend(
+            [
+                "--cache=no",
+                "--demuxer-lavf-analyzeduration=0",
+                "--demuxer-lavf-probesize=32768",
+                "--demuxer-lavf-o=fflags=+nobuffer",
+                "--opengl-swapinterval=0",
+            ]
+        )
     extra = os.environ.get("MPV_EXTRA_ARGS", "").strip()
     if extra:
         args.extend(shlex.split(extra))
