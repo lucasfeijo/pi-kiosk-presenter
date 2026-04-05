@@ -551,11 +551,77 @@ class DisplayManager:
         except Exception:
             return {"cpu_pct": None, "rss_mb": None}
 
+    @staticmethod
+    def _system_stats() -> dict:
+        """Collect system-wide stats from /proc and /sys."""
+        stats: dict = {}
+        try:
+            with open("/proc/loadavg") as f:
+                parts = f.read().split()
+            stats["load_1"] = float(parts[0])
+            stats["load_5"] = float(parts[1])
+            stats["load_15"] = float(parts[2])
+        except Exception:
+            pass
+        try:
+            with open("/proc/stat") as f:
+                for line in f:
+                    if line.startswith("cpu "):
+                        vals = list(map(int, line.split()[1:]))
+                        idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+                        total = sum(vals)
+                        stats["cpu_idle_ticks"] = idle
+                        stats["cpu_total_ticks"] = total
+                        break
+        except Exception:
+            pass
+        try:
+            with open("/proc/meminfo") as f:
+                mi = {}
+                for line in f:
+                    k, v = line.split(":", 1)
+                    mi[k.strip()] = int(v.strip().split()[0])
+                total = mi.get("MemTotal", 0)
+                avail = mi.get("MemAvailable", mi.get("MemFree", 0))
+                stats["mem_total_mb"] = round(total / 1024, 1)
+                stats["mem_used_mb"] = round((total - avail) / 1024, 1)
+        except Exception:
+            pass
+        for path in (
+            "/sys/class/thermal/thermal_zone0/temp",
+            "/sys/class/hwmon/hwmon0/temp1_input",
+        ):
+            try:
+                with open(path) as f:
+                    stats["cpu_temp_c"] = round(int(f.read().strip()) / 1000, 1)
+                break
+            except Exception:
+                continue
+        try:
+            st = os.statvfs("/")
+            total = st.f_blocks * st.f_frsize
+            free = st.f_bavail * st.f_frsize
+            stats["disk_total_gb"] = round(total / (1024 ** 3), 1)
+            stats["disk_used_gb"] = round((total - free) / (1024 ** 3), 1)
+        except Exception:
+            pass
+        try:
+            with open("/proc/uptime") as f:
+                stats["uptime_sec"] = int(float(f.read().split()[0]))
+        except Exception:
+            pass
+        try:
+            stats["cpu_count"] = os.cpu_count() or 1
+        except Exception:
+            pass
+        return stats
+
     def status(self) -> dict:
         """Return current state."""
         with self.lock:
             return {
                 "screen": {"width": self.screen_w, "height": self.screen_h},
+                "system": self._system_stats(),
                 "panes": {
                     name: {
                         "type": mp.ptype,
@@ -810,6 +876,15 @@ details textarea{{width:100%;min-height:160px;margin-top:8px;background:#0d1117;
   font-size:12px;resize:vertical;tab-size:2}}
 .info-line{{color:#8b949e;font-size:12px;margin-bottom:10px}}
 label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight:normal}}
+.sys-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}
+@media(max-width:500px){{.sys-grid{{grid-template-columns:1fr}}}}
+.sys-stat{{text-align:center}}
+.sys-stat .val{{font-size:1.3rem;font-weight:700;color:#e6edf3}}
+.sys-stat .lbl{{font-size:11px;color:#8b949e;margin-top:2px}}
+.bar-wrap{{height:6px;background:#21262d;border-radius:3px;margin-top:6px;overflow:hidden}}
+.bar-fill{{height:100%;border-radius:3px;transition:width .4s ease}}
+.bar-ok{{background:#238636}}.bar-warn{{background:#d29922}}.bar-crit{{background:#da3633}}
+.sys-sub{{font-size:11px;color:#8b949e;margin-top:3px}}
 </style></head><body>
 <h1>Pi Display Server</h1>
 <div class="top">
@@ -828,6 +903,11 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
       <textarea id="raw-json"></textarea>
       <div class="actions"><button class="btn-secondary btn-sm" onclick="loadFromJson()">Load from JSON</button></div>
     </details>
+  </div>
+  <div class="card">
+    <h2>System</h2>
+    <div class="sys-grid" id="sys-stats"></div>
+    <p class="sys-sub" id="sys-extra"></p>
   </div>
   <div class="card">
     <h2>Running Panes</h2>
@@ -1182,12 +1262,86 @@ async function clearAll() {{
   }}
 }}
 
+let prevCpuIdle = null, prevCpuTotal = null;
+
 async function refreshStatus() {{
   try {{
     const res = await fetch("/status");
     statusData = await res.json();
+    renderSystemStats();
     renderProcTable();
   }} catch(e) {{}}
+}}
+
+function barClass(pct) {{ return pct > 85 ? "bar-crit" : pct > 65 ? "bar-warn" : "bar-ok"; }}
+
+function fmtUptime(sec) {{
+  if (sec == null) return "\\u2014";
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600),
+        m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return d + "d " + h + "h";
+  if (h > 0) return h + "h " + m + "m";
+  return m + "m";
+}}
+
+function renderSystemStats() {{
+  const s = statusData.system || {{}};
+  const grid = document.getElementById("sys-stats");
+  const extra = document.getElementById("sys-extra");
+
+  let cpuPct = null;
+  if (s.cpu_total_ticks != null && prevCpuTotal != null) {{
+    const dTotal = s.cpu_total_ticks - prevCpuTotal;
+    const dIdle = s.cpu_idle_ticks - prevCpuIdle;
+    if (dTotal > 0) cpuPct = Math.round((1 - dIdle / dTotal) * 100);
+  }}
+  prevCpuIdle = s.cpu_idle_ticks;
+  prevCpuTotal = s.cpu_total_ticks;
+
+  let memPct = null;
+  if (s.mem_total_mb) memPct = Math.round(s.mem_used_mb / s.mem_total_mb * 100);
+
+  let diskPct = null;
+  if (s.disk_total_gb) diskPct = Math.round(s.disk_used_gb / s.disk_total_gb * 100);
+
+  const items = [];
+  items.push({{
+    lbl: "CPU",
+    val: cpuPct != null ? cpuPct + "%" : "\\u2014",
+    pct: cpuPct,
+    sub: s.cpu_count ? s.cpu_count + " cores" : ""
+  }});
+  items.push({{
+    lbl: "Memory",
+    val: s.mem_used_mb != null ? s.mem_used_mb + " / " + s.mem_total_mb + " MB" : "\\u2014",
+    pct: memPct,
+    sub: ""
+  }});
+  items.push({{
+    lbl: "Temperature",
+    val: s.cpu_temp_c != null ? s.cpu_temp_c + " \\u00b0C" : "\\u2014",
+    pct: s.cpu_temp_c != null ? Math.min(100, Math.round((s.cpu_temp_c / 85) * 100)) : null,
+    sub: ""
+  }});
+  items.push({{
+    lbl: "Disk",
+    val: s.disk_used_gb != null ? s.disk_used_gb + " / " + s.disk_total_gb + " GB" : "\\u2014",
+    pct: diskPct,
+    sub: ""
+  }});
+
+  grid.innerHTML = items.map(it => {{
+    const bar = it.pct != null
+      ? '<div class="bar-wrap"><div class="bar-fill ' + barClass(it.pct) + '" style="width:' + it.pct + '%"></div></div>'
+      : '';
+    return '<div class="sys-stat"><div class="val">' + it.val + '</div><div class="lbl">' + it.lbl + '</div>' + bar +
+      (it.sub ? '<div class="sys-sub">' + it.sub + '</div>' : '') + '</div>';
+  }}).join("");
+
+  const parts = [];
+  if (s.load_1 != null) parts.push("Load: " + s.load_1 + " / " + s.load_5 + " / " + s.load_15);
+  if (s.uptime_sec != null) parts.push("Uptime: " + fmtUptime(s.uptime_sec));
+  extra.textContent = parts.join("  \\u00b7  ");
 }}
 
 function renderProcTable() {{
@@ -1213,6 +1367,8 @@ window.addEventListener("resize", () => {{ initPreview(); render(); }});
 initPreview();
 render();
 renderProcTable();
+refreshStatus();
+setInterval(refreshStatus, 5000);
 </script></body></html>"""
         self._send_html(html)
 
