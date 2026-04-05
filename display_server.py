@@ -13,6 +13,7 @@ import logging
 import os
 import shlex
 import signal
+import ssl
 import subprocess
 import sys
 import time
@@ -1414,6 +1415,35 @@ setInterval(refreshStatus, 5000);
 
 
 # ---------------------------------------------------------------------------
+# SSL helpers
+# ---------------------------------------------------------------------------
+
+_DEFAULT_CERT_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "certs"
+)
+
+
+def _ensure_selfsigned_cert(cert_dir: str = _DEFAULT_CERT_DIR) -> tuple[str, str]:
+    """Generate a self-signed cert/key pair via openssl if they don't exist yet."""
+    cert = os.path.join(cert_dir, "server.crt")
+    key = os.path.join(cert_dir, "server.key")
+    if os.path.exists(cert) and os.path.exists(key):
+        return cert, key
+    os.makedirs(cert_dir, mode=0o700, exist_ok=True)
+    log.info("Generating self-signed certificate in %s …", cert_dir)
+    subprocess.run(
+        [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048",
+            "-keyout", key, "-out", cert,
+            "-days", "3650", "-nodes",
+            "-subj", "/CN=pi-display-server",
+        ],
+        check=True,
+    )
+    return cert, key
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1431,7 +1461,20 @@ def main():
     dm.load_saved_layout()
 
     server = HTTPServer((host, port), Handler)
-    log.info("Pi Display Server listening on %s:%d", host, port)
+
+    # -- optional HTTPS --
+    cert = os.environ.get("SSL_CERT")
+    key = os.environ.get("SSL_KEY")
+    auto_ssl = os.environ.get("SSL_SELFSIGNED", "").lower() in ("1", "true", "yes")
+    if auto_ssl and not (cert and key):
+        cert, key = _ensure_selfsigned_cert()
+    if cert and key:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, key)
+        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        log.info("Pi Display Server listening on https://%s:%d (cert=%s)", host, port, cert)
+    else:
+        log.info("Pi Display Server listening on http://%s:%d", host, port)
 
     # Graceful shutdown
     def _shutdown(sig, frame):

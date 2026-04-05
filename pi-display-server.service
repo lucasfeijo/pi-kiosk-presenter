@@ -10,6 +10,8 @@ User=pi
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/pi/.Xauthority
 Environment=DISPLAY_PORT=8686
+# Uncomment to enable HTTPS with a self-signed certificate:
+#Environment=SSL_SELFSIGNED=1
 ExecStart=/usr/bin/python3 /opt/pi-display-server/display_server.py
 Restart=on-failure
 RestartSec=1
