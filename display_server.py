@@ -798,6 +798,7 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
       <div><label>H</label><input id="p-h" type="number" step="0.01" min="0.02" max="1" onchange="updateCoord('h',this.value)"></div>
     </div>
     <div class="actions">
+      <button class="btn-secondary btn-sm" onclick="refreshSelected()">Refresh Pane</button>
       <button class="btn-danger btn-sm" onclick="deleteSelected()">Delete Pane</button>
     </div>
   </div>
@@ -1014,6 +1015,23 @@ function deleteSelected() {{
   layout.splice(selectedIdx, 1);
   selectedIdx = -1;
   render();
+}}
+
+async function refreshSelected() {{
+  if (selectedIdx < 0) return;
+  const pane = layout[selectedIdx];
+  try {{
+    const res = await fetch("/pane", {{
+      method: "POST",
+      headers: {{"Content-Type": "application/json"}},
+      body: JSON.stringify(pane),
+    }});
+    const data = await res.json();
+    if (res.ok) {{
+      showResult(true, "Refreshed pane '" + (pane.name || "?") + "'");
+      setTimeout(refreshStatus, 2000);
+    }} else showResult(false, data.error || "Error");
+  }} catch(e) {{ showResult(false, e.message); }}
 }}
 
 function syncJson() {{
