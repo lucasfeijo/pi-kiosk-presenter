@@ -416,16 +416,10 @@ class DisplayManager:
 
     def _launch_stats(self, pane: dict, geom: tuple[int, int, int, int]) -> subprocess.Popen:
         """Launch a chromium window showing the built-in system stats page."""
-        port = int(os.environ.get("DISPLAY_PORT", "8686"))
-        has_ssl = os.environ.get("SSL_SELFSIGNED", "").lower() in ("1", "true", "yes") or (
-            os.environ.get("SSL_CERT") and os.environ.get("SSL_KEY")
-        )
-        scheme = "https" if has_ssl else "http"
-        url = f"{scheme}://localhost:{port}/stats"
-        extra = list(pane.get("chromium_args", []))
-        if has_ssl:
-            extra.append("--ignore-certificate-errors")
-        stats_pane = {**pane, "type": "web", "url": url, "chromium_args": extra}
+        internal_port = os.environ.get("_INTERNAL_HTTP_PORT")
+        port = int(internal_port or os.environ.get("DISPLAY_PORT", "8686"))
+        url = f"http://localhost:{port}/stats"
+        stats_pane = {**pane, "type": "web", "url": url}
         return self._launch_web(stats_pane, geom)
 
     LAUNCHERS = {
@@ -1597,6 +1591,7 @@ def main():
     dm.load_saved_layout()
 
     server = HTTPServer((host, port), Handler)
+    http_server = None
 
     # -- optional HTTPS --
     cert = os.environ.get("SSL_CERT")
@@ -1609,6 +1604,13 @@ def main():
         ctx.load_cert_chain(cert, key)
         server.socket = ctx.wrap_socket(server.socket, server_side=True)
         log.info("Pi Display Server listening on https://%s:%d (cert=%s)", host, port, cert)
+        # Plain HTTP on localhost for internal panes (stats) — avoids
+        # self-signed cert warnings inside chromium on the Pi.
+        http_port = port + 1
+        http_server = HTTPServer(("127.0.0.1", http_port), Handler)
+        Thread(target=http_server.serve_forever, daemon=True).start()
+        os.environ["_INTERNAL_HTTP_PORT"] = str(http_port)
+        log.info("Internal HTTP on 127.0.0.1:%d (for local panes)", http_port)
     else:
         log.info("Pi Display Server listening on http://%s:%d", host, port)
 
@@ -1617,6 +1619,8 @@ def main():
         log.info("Shutting down…")
         dm.stop_watchdog()
         dm._kill_all()
+        if http_server:
+            http_server.shutdown()
         server.shutdown()
         sys.exit(0)
 
