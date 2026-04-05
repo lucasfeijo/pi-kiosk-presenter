@@ -414,6 +414,20 @@ class DisplayManager:
         log.info("Launching command: %s", " ".join(cmd))
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    def _launch_stats(self, pane: dict, geom: tuple[int, int, int, int]) -> subprocess.Popen:
+        """Launch a chromium window showing the built-in system stats page."""
+        port = int(os.environ.get("DISPLAY_PORT", "8686"))
+        has_ssl = os.environ.get("SSL_SELFSIGNED", "").lower() in ("1", "true", "yes") or (
+            os.environ.get("SSL_CERT") and os.environ.get("SSL_KEY")
+        )
+        scheme = "https" if has_ssl else "http"
+        url = f"{scheme}://localhost:{port}/stats"
+        extra = list(pane.get("chromium_args", []))
+        if has_ssl:
+            extra.append("--ignore-certificate-errors")
+        stats_pane = {**pane, "type": "web", "url": url, "chromium_args": extra}
+        return self._launch_web(stats_pane, geom)
+
     LAUNCHERS = {
         "rtsp": _launch_rtsp,
         "stream": _launch_rtsp,     # alias
@@ -421,6 +435,7 @@ class DisplayManager:
         "browser": _launch_web,     # alias
         "image": _launch_image,
         "command": _launch_command,
+        "stats": _launch_stats,
     }
 
     # -- core operations ----------------------------------------------------
@@ -808,6 +823,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/":
             self._serve_index()
+        elif self.path == "/stats":
+            self._serve_stats()
         elif self.path == "/status":
             self._send_json(dm.status())
         elif self.path == "/health":
@@ -929,6 +946,7 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
     <select id="p-type" onchange="updateProp('type',this.value)">
       <option value="rtsp">rtsp</option><option value="web">web</option>
       <option value="image">image</option><option value="command">command</option>
+      <option value="stats">stats</option>
     </select>
     <label>URL / Path</label><input id="p-url" oninput="updateUrlProp(this.value)">
     <label>Fit (rtsp only)</label>
@@ -1370,6 +1388,124 @@ render();
 renderProcTable();
 refreshStatus();
 setInterval(refreshStatus, 5000);
+</script></body></html>"""
+        self._send_html(html)
+
+    def _serve_stats(self):
+        """Standalone system-stats page for the 'stats' pane type."""
+        html = """<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pi Stats</title>
+<style>
+*,*::before,*::after{box-sizing:border-box}
+body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:0;background:#0d1117;color:#e6edf3;
+  display:flex;align-items:center;justify-content:center;min-height:100vh;overflow:hidden}
+.wrap{width:100%;max-width:600px;padding:24px}
+h1{font-size:1.1rem;margin:0 0 18px;color:#58a6ff;text-align:center;letter-spacing:.5px;text-transform:uppercase}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.stat{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;text-align:center}
+.stat .val{font-size:1.8rem;font-weight:700;color:#e6edf3;line-height:1.2}
+.stat .lbl{font-size:12px;color:#8b949e;margin-top:4px;text-transform:uppercase;letter-spacing:.4px}
+.bar-wrap{height:6px;background:#21262d;border-radius:3px;margin-top:10px;overflow:hidden}
+.bar-fill{height:100%;border-radius:3px;transition:width .6s ease}
+.bar-ok{background:#238636}.bar-warn{background:#d29922}.bar-crit{background:#da3633}
+.stat .sub{font-size:11px;color:#8b949e;margin-top:5px}
+.footer{text-align:center;color:#8b949e;font-size:12px;margin-top:18px}
+.panes-section{margin-top:18px}
+.panes-section h2{font-size:.8rem;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin:0 0 8px}
+.pane-row{display:flex;justify-content:space-between;align-items:center;padding:5px 10px;
+  background:#161b22;border:1px solid #30363d;border-radius:6px;margin-bottom:4px;font-size:13px}
+.pane-row .pname{font-weight:600}.pane-row .ptype{color:#8b949e;font-size:11px}
+.pane-row .pstats{color:#8b949e;font-size:12px}
+.badge{padding:2px 7px;border-radius:10px;font-size:10px;font-weight:600}
+.badge.alive{background:#238636;color:#fff}.badge.dead{background:#da3633;color:#fff}
+</style></head><body>
+<div class="wrap">
+<h1>System Stats</h1>
+<div class="grid" id="grid"></div>
+<div class="footer" id="footer"></div>
+<div class="panes-section">
+<h2>Panes</h2>
+<div id="pane-list"></div>
+</div>
+</div>
+<script>
+let prevIdle = null, prevTotal = null;
+
+function barClass(pct) { return pct > 85 ? "bar-crit" : pct > 65 ? "bar-warn" : "bar-ok"; }
+
+function fmtUptime(sec) {
+  if (sec == null) return "\\u2014";
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600),
+        m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return d + "d " + h + "h";
+  if (h > 0) return h + "h " + m + "m";
+  return m + "m";
+}
+
+async function refresh() {
+  try {
+    const res = await fetch("/status");
+    const data = await res.json();
+    renderStats(data.system || {});
+    renderPanes(data.panes || {});
+  } catch(e) {}
+}
+
+function renderStats(s) {
+  let cpuPct = null;
+  if (s.cpu_total_ticks != null && prevTotal != null) {
+    const dT = s.cpu_total_ticks - prevTotal, dI = s.cpu_idle_ticks - prevIdle;
+    if (dT > 0) cpuPct = Math.round((1 - dI / dT) * 100);
+  }
+  prevIdle = s.cpu_idle_ticks; prevTotal = s.cpu_total_ticks;
+
+  const memPct = s.mem_total_mb ? Math.round(s.mem_used_mb / s.mem_total_mb * 100) : null;
+  const diskPct = s.disk_total_gb ? Math.round(s.disk_used_gb / s.disk_total_gb * 100) : null;
+
+  const items = [
+    { lbl: "CPU", val: cpuPct != null ? cpuPct + "%" : "\\u2014", pct: cpuPct,
+      sub: s.cpu_count ? s.cpu_count + " cores" : "" },
+    { lbl: "Memory", val: s.mem_used_mb != null ? s.mem_used_mb + " / " + s.mem_total_mb + " MB" : "\\u2014",
+      pct: memPct, sub: "" },
+    { lbl: "Temp", val: s.cpu_temp_c != null ? s.cpu_temp_c + " \\u00b0C" : "\\u2014",
+      pct: s.cpu_temp_c != null ? Math.min(100, Math.round(s.cpu_temp_c / 85 * 100)) : null, sub: "" },
+    { lbl: "Disk", val: s.disk_used_gb != null ? s.disk_used_gb + " / " + s.disk_total_gb + " GB" : "\\u2014",
+      pct: diskPct, sub: "" }
+  ];
+
+  document.getElementById("grid").innerHTML = items.map(it => {
+    const bar = it.pct != null
+      ? '<div class="bar-wrap"><div class="bar-fill ' + barClass(it.pct) + '" style="width:' + it.pct + '%"></div></div>'
+      : '';
+    return '<div class="stat"><div class="val">' + it.val + '</div><div class="lbl">' + it.lbl + '</div>' + bar +
+      (it.sub ? '<div class="sub">' + it.sub + '</div>' : '') + '</div>';
+  }).join("");
+
+  const parts = [];
+  if (s.load_1 != null) parts.push("Load: " + s.load_1 + " / " + s.load_5 + " / " + s.load_15);
+  if (s.uptime_sec != null) parts.push("Uptime: " + fmtUptime(s.uptime_sec));
+  document.getElementById("footer").textContent = parts.join("  \\u00b7  ");
+}
+
+function renderPanes(panes) {
+  const names = Object.keys(panes);
+  const el = document.getElementById("pane-list");
+  if (!names.length) { el.innerHTML = '<div style="color:#8b949e;font-size:13px">No panes</div>'; return; }
+  el.innerHTML = names.map(n => {
+    const p = panes[n];
+    const st = p.alive ? "alive" : "dead";
+    const cpu = p.cpu_pct != null ? p.cpu_pct + "%" : "\\u2014";
+    const mem = p.rss_mb != null ? p.rss_mb + "MB" : "\\u2014";
+    return '<div class="pane-row"><span><span class="pname">' + n + '</span> <span class="ptype">' + p.type + '</span></span>' +
+      '<span class="pstats"><span class="badge ' + st + '">' + st + '</span> ' + cpu + ' / ' + mem + '</span></div>';
+  }).join("");
+}
+
+refresh();
+setInterval(refresh, 3000);
 </script></body></html>"""
         self._send_html(html)
 
