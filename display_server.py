@@ -97,9 +97,6 @@ def _mpv_rtsp_perf_args(pane: dict) -> list[str]:
                 "--demuxer-readahead-secs=0.5",
                 "--demuxer-lavf-analyzeduration=1",
                 "--demuxer-lavf-probesize=524288",
-                "--opengl-swapinterval=0",
-                "--fps=25",
-                "--untimed=no",
             ]
         )
     else:
@@ -339,6 +336,10 @@ class DisplayManager:
 
         name = pane.get("name", "rtsp")
         hwdec = pane.get("hwdec") or MPV_HWDEC
+        # drm-copy does HW decode but copies pixels through RAM — expensive for
+        # large HEVC frames.  Upgrade to zero-copy "drm" automatically.
+        if hwdec == "drm-copy":
+            hwdec = "drm"
         cmd = [
             "mpv",
             f"--title={name}",
