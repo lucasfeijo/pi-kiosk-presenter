@@ -17,6 +17,11 @@ ssh "${PI_HOST}" "set -e
       sudo apt-get update -qq
       sudo apt-get install -y -qq git
     fi
+    if ! command -v xdpyinfo >/dev/null 2>&1; then
+      echo 'Installing x11-utils…'
+      sudo apt-get update -qq
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq x11-utils
+    fi
     sudo rm -rf ${REMOTE_DIR}
     sudo git clone ${REPO_URL} ${REMOTE_DIR}
     sudo chmod +x ${REMOTE_DIR}/update.sh
