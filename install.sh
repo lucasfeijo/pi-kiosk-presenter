@@ -69,7 +69,7 @@ xrandr -o right
 if command -v xinput >/dev/null 2>&1; then
   touch_ids=""
   for _ in $(seq 1 20); do
-    touch_ids=$(xinput --list --short | sed -n "s/.*id=\([0-9]\+\).*slave[[:space:]]\+pointer.*/\1/p")
+    touch_ids=$(xinput --list --short | awk '/slave[[:space:]]+pointer/ && tolower($0) ~ /(touch|stylus)/ {for (i = 1; i <= NF; i++) if ($i ~ /^id=/) {split($i, a, "="); print a[2]}}')
     [ -n "$touch_ids" ] && break
     sleep 1
   done
