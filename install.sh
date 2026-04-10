@@ -20,6 +20,7 @@ sudo apt-get install -y -qq \
     git \
     xserver-xorg \
     xinit \
+    xinput \
     openbox \
     xdotool \
     x11-utils \
@@ -63,6 +64,21 @@ xset -dpms
 xset s off
 xset s noblank
 xrandr -o right
+
+# Touch/pointer mapping can appear late after X starts.
+if command -v xinput >/dev/null 2>&1; then
+  touch_ids=""
+  for _ in $(seq 1 20); do
+    touch_ids=$(xinput --list --short | sed -n "s/.*id=\([0-9]\+\).*slave[[:space:]]\+pointer.*/\1/p")
+    [ -n "$touch_ids" ] && break
+    sleep 1
+  done
+  for id in $touch_ids; do
+    if xinput list-props "$id" | awk -F: '/Coordinate Transformation Matrix/ {found=1} END {exit !found}'; then
+      xinput set-prop "$id" "Coordinate Transformation Matrix" 0 1 0 -1 0 1 0 0 1 || true
+    fi
+  done
+fi
 
 sudo systemctl restart pi-display-server &
 
