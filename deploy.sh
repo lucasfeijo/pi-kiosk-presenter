@@ -4,9 +4,28 @@ set -euo pipefail
 PI_HOST="${PI_HOST:-pi@ap900-pi-kiosk.local}"
 REMOTE_DIR="/opt/pi-display-server"
 REPO_URL="$(git remote get-url origin)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODE="${1:-update}"
+
+if [ "${MODE}" != "update" ] && [ "${MODE}" != "--bootstrap" ]; then
+  echo "Uso: ./deploy.sh [--bootstrap]"
+  exit 1
+fi
 
 echo "Pushing to git…"
 git push
+
+if [ "${MODE}" = "--bootstrap" ]; then
+  echo "Bootstrapping Pi (${PI_HOST}) with install.sh…"
+  scp "${SCRIPT_DIR}/install.sh" "${PI_HOST}:/tmp/install-pi-display-server.sh"
+  ssh "${PI_HOST}" "set -e
+    chmod +x /tmp/install-pi-display-server.sh
+    bash /tmp/install-pi-display-server.sh ${REPO_URL}
+    rm -f /tmp/install-pi-display-server.sh
+  "
+  echo "Done — bootstrap finished"
+  exit 0
+fi
 
 echo "Updating Pi (${PI_HOST})…"
 ssh "${PI_HOST}" "set -e

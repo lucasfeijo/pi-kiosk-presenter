@@ -19,6 +19,7 @@ sudo apt-get update -qq
 sudo apt-get install -y -qq \
     git \
     xserver-xorg \
+    xinit \
     openbox \
     xdotool \
     x11-utils \
@@ -82,6 +83,15 @@ BASHPROFILE
 else
     echo "  ~/.bash_profile already exists, skipping"
 fi
+
+sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
+sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null <<EOF
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin ${CURRENT_USER} --noclear %I \$TERM
+EOF
+sudo systemctl daemon-reload
+echo "  Enabled tty1 autologin for ${CURRENT_USER}"
 
 # --- Start -----------------------------------------------------------------
 echo "[6/6] Starting service…"
