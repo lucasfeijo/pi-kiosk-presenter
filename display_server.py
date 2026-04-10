@@ -1402,24 +1402,24 @@ setInterval(refreshStatus, 5000);
 *,*::before,*::after{box-sizing:border-box}
 body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:0;background:#0d1117;color:#e6edf3;
   display:flex;align-items:center;justify-content:center;min-height:100vh;overflow:hidden}
-.wrap{width:100%;max-width:600px;padding:24px}
-h1{font-size:1.1rem;margin:0 0 18px;color:#58a6ff;text-align:center;letter-spacing:.5px;text-transform:uppercase}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.stat{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;text-align:center}
-.stat .val{font-size:1.8rem;font-weight:700;color:#e6edf3;line-height:1.2}
-.stat .lbl{font-size:12px;color:#8b949e;margin-top:4px;text-transform:uppercase;letter-spacing:.4px}
-.bar-wrap{height:6px;background:#21262d;border-radius:3px;margin-top:10px;overflow:hidden}
-.bar-fill{height:100%;border-radius:3px;transition:width .6s ease}
+.wrap{width:100%;max-width:420px;padding:12px}
+h1{font-size:.9rem;margin:0 0 10px;color:#58a6ff;text-align:center;letter-spacing:.4px;text-transform:uppercase}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:9px;text-align:center}
+.stat .val{font-size:1.1rem;font-weight:700;color:#e6edf3;line-height:1.2}
+.stat .lbl{font-size:10px;color:#8b949e;margin-top:2px;text-transform:uppercase;letter-spacing:.3px}
+.bar-wrap{height:4px;background:#21262d;border-radius:2px;margin-top:6px;overflow:hidden}
+.bar-fill{height:100%;border-radius:2px;transition:width .6s ease}
 .bar-ok{background:#238636}.bar-warn{background:#d29922}.bar-crit{background:#da3633}
-.stat .sub{font-size:11px;color:#8b949e;margin-top:5px}
-.footer{text-align:center;color:#8b949e;font-size:12px;margin-top:18px}
-.panes-section{margin-top:18px}
-.panes-section h2{font-size:.8rem;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin:0 0 8px}
-.pane-row{display:flex;justify-content:space-between;align-items:center;padding:5px 10px;
-  background:#161b22;border:1px solid #30363d;border-radius:6px;margin-bottom:4px;font-size:13px}
-.pane-row .pname{font-weight:600}.pane-row .ptype{color:#8b949e;font-size:11px}
-.pane-row .pstats{color:#8b949e;font-size:12px}
-.badge{padding:2px 7px;border-radius:10px;font-size:10px;font-weight:600}
+.stat .sub{font-size:9px;color:#8b949e;margin-top:3px}
+.footer{text-align:center;color:#8b949e;font-size:10px;margin-top:10px}
+.panes-section{margin-top:10px}
+.panes-section h2{font-size:.7rem;color:#8b949e;text-transform:uppercase;letter-spacing:.4px;margin:0 0 5px}
+.pane-row{display:flex;justify-content:space-between;align-items:center;padding:3px 6px;
+  background:#161b22;border:1px solid #30363d;border-radius:5px;margin-bottom:3px;font-size:10px}
+.pane-row .pname{font-weight:600}.pane-row .ptype{color:#8b949e;font-size:9px}
+.pane-row .pstats{color:#8b949e;font-size:9px}
+.badge{padding:1px 5px;border-radius:8px;font-size:8px;font-weight:600}
 .badge.alive{background:#238636;color:#fff}.badge.dead{background:#da3633;color:#fff}
 </style></head><body>
 <div class="wrap">
@@ -1493,7 +1493,7 @@ function renderStats(s) {
 function renderPanes(panes) {
   const names = Object.keys(panes);
   const el = document.getElementById("pane-list");
-  if (!names.length) { el.innerHTML = '<div style="color:#8b949e;font-size:13px">No panes</div>'; return; }
+  if (!names.length) { el.innerHTML = '<div style="color:#8b949e;font-size:10px">No panes</div>'; return; }
   el.innerHTML = names.map(n => {
     const p = panes[n];
     const st = p.alive ? "alive" : "dead";
