@@ -358,7 +358,11 @@ class DisplayManager:
             *extra,
         ]
         log.info("Launching mpv: %s", " ".join(cmd))
-        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # High CPU priority + real-time I/O for smooth playback
+        return subprocess.Popen(
+            ["nice", "-n", "-10", "ionice", "-c", "1", "-n", "4", *cmd],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
 
     def _launch_web(self, pane: dict, geom: tuple[int, int, int, int]) -> subprocess.Popen:
         url = pane["url"]
@@ -396,7 +400,11 @@ class DisplayManager:
             *extra,
         ]
         log.info("Launching chromium: %s", " ".join(cmd))
-        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Low CPU priority so it doesn't starve mpv
+        return subprocess.Popen(
+            ["nice", "-n", "10", *cmd],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
 
     def _launch_image(self, pane: dict, geom: tuple[int, int, int, int]) -> subprocess.Popen:
         path = pane["path"]
