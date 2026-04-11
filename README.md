@@ -2,25 +2,26 @@
 
 Remote HTTP control of what your Raspberry Pi 4 shows on HDMI. Send JSON layouts to arrange RTSP streams, web pages, images, and arbitrary commands on screen.
 
-Designed for **Raspberry Pi OS Lite + X11**.
+Supports two display backends: **X11** (default, legacy) and **Wayland/Sway** (recommended for new installs).
 
 ## Install
 
 On a fresh Pi, run the installer with your repo URL:
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/YOU/pi-display-server/main/install.sh) \
-  https://github.com/YOU/pi-display-server.git
+# X11 (default):
+bash install.sh https://github.com/YOU/pi-display-server.git
+
+# Wayland/Sway:
+DISPLAY_BACKEND=wayland bash install.sh https://github.com/YOU/pi-display-server.git
 ```
 
-Or clone first and run locally:
+This clones the repo to `/opt/pi-display-server`, installs backend-specific dependencies, sets up the systemd service on port **8686**, and creates boot files (only if they don't already exist).
 
-```bash
-git clone https://github.com/YOU/pi-display-server.git /tmp/pi-display-server
-bash /tmp/pi-display-server/install.sh https://github.com/YOU/pi-display-server.git
-```
-
-This clones the repo to `/opt/pi-display-server`, installs all dependencies (X11, openbox, xdotool, mpv, chromium, feh), sets up the systemd service on port **8686**, and creates default `~/.xinitrc` and `~/.bash_profile` for kiosk boot (only if they don't already exist).
+| Backend | Dependencies |
+|---------|-------------|
+| `x11` (default) | X11, openbox, xdotool, mpv, chromium, feh |
+| `wayland` | Sway, mpv, chromium (Ozone/Wayland), imv |
 
 ## Prerequisites
 
@@ -31,13 +32,21 @@ This clones the repo to `/opt/pi-display-server`, installs all dependencies (X11
 
 On power-up, the system starts automatically:
 
+### X11 backend
 1. **getty** auto-logs in the `pi` user on tty1
-2. **`~/.bash_profile`** runs `startx` (only on tty1, only without an existing display)
+2. **`~/.bash_profile`** runs `startx`
 3. **`~/.xinitrc`** disables screen blanking, rotates the display, and starts Openbox
-4. **systemd** starts `pi-display-server.service` after `graphical.target`
-5. **`display_server.py`** restores the last saved layout from `layout.json`
+4. **systemd** starts `pi-display-server.service`, waits for X via `xdpyinfo`
+5. **`display_server.py`** restores the last saved layout
 
-No display manager (lightdm) needed.
+### Wayland backend
+1. **getty** auto-logs in the `pi` user on tty1
+2. **`~/.bash_profile`** runs `sway`
+3. **Sway config** sets output rotation, input mapping, and floating-by-default
+4. **systemd** starts `pi-display-server.service`, waits for Sway IPC socket
+5. **`display_server.py`** restores the last saved layout via `swaymsg`
+
+No display manager (lightdm) needed for either backend.
 
 ## Deploying Updates
 
@@ -64,8 +73,8 @@ PI_HOST=pi@other-pi.local ./deploy.sh
 | What crashes | Who restarts it | How |
 |---|---|---|
 | **display_server.py** | systemd | `Restart=on-failure` with 1s delay. Server reloads `layout.json` and re-creates all panes. Rate-limited to 5 restarts per 60s. |
-| **A child pane** (mpv, chromium, feh) | Watchdog thread | Polls every 10s, re-launches dead panes from the stored layout. |
-| **X11 / Openbox** | getty + bash_profile | Full reset: login re-runs `startx`, systemd restarts the server. |
+| **A child pane** (mpv, chromium, feh/imv) | Watchdog thread | Polls every 10s, re-launches dead panes from the stored layout. |
+| **X11 / Openbox** or **Sway** | getty + bash_profile | Full reset: login re-runs `startx` or `sway`, systemd restarts the server. |
 
 ## API Reference
 
@@ -145,8 +154,8 @@ curl -X POST http://pi:8686/clear
 |------|-------|--------------|-----------------|
 | `rtsp` | `stream` | Plays a stream via `mpv` | `url` |
 | `web` | `browser` | Opens a URL in Chromium kiosk mode | `url` |
-| `image` | — | Shows an image via `feh` | `path` |
-| `command` | — | Runs any command that creates an X window | `cmd` |
+| `image` | — | Shows an image via `feh` (X11) or `imv` (Wayland) | `path` |
+| `command` | — | Runs any command that creates a window | `cmd` |
 
 ## Visual Layout Editor
 
@@ -268,9 +277,10 @@ Environment variables (set in the systemd service or export before running):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `DISPLAY_BACKEND` | `x11` | Display backend: `x11` or `wayland` (Sway). |
 | `DISPLAY_HOST` | `0.0.0.0` | Bind address |
 | `DISPLAY_PORT` | `8686` | HTTP port |
-| `DISPLAY` | `:0` | X11 display |
+| `DISPLAY` | `:0` | X11 display (only used with `x11` backend) |
 | `WATCHDOG_INTERVAL` | `10` | Seconds between child-process health checks |
 | `MPV_HWDEC` | `v4l2m2m-copy` | Default hardware decode for RTSP (Pi H.264). Use `drm-copy` if every pane is HEVC. |
 | `MPV_RTSP_FAST` | `1` | Low-latency RTSP tweaks (`cache=no`, small probe, no audio unless `audio: true`, `opengl-swapinterval=0`). Set `0` to disable. |
@@ -286,8 +296,26 @@ journalctl -u pi-display-server -f
 
 ## Tips
 
-- **Window manager**: Use `openbox` — it's minimal and respects xdotool move/resize without fighting.
 - **Hardware decoding on Pi**: Do not use `--hwdec=auto` for RTSP; it usually falls back to software. Use `v4l2m2m-copy` for H.264 and `drm-copy` for H.265 mains (see table above or the web UI **hwdec** field).
-- **Chromium logins**: Web panes store cookies under `CHROMIUM_USER_DATA_ROOT/<pane name>/` (not `/tmp`), so sessions persist across reboots. Renaming a pane uses a new folder (fresh login). To carry over an old profile: `mkdir -p ~/.local/share/pi-display-server/chromium` then `mv /tmp/pi-display-chromium-'PaneName' ~/.local/share/pi-display-server/chromium/'PaneName'` (match the pane **name** exactly).
-- **Chromium GPU**: If Chromium is slow, try adding `"chromium_args": ["--enable-gpu-rasterization"]`.
+- **Chromium logins**: Web panes store cookies under `CHROMIUM_USER_DATA_ROOT/<pane name>/` (not `/tmp`), so sessions persist across reboots. Renaming a pane uses a new folder (fresh login).
 - **Manual update**: SSH into the Pi and run `update-display` to pull the latest code and restart.
+
+### X11 backend tips
+- **Window manager**: Use `openbox` — it's minimal and respects xdotool move/resize without fighting.
+- **Chromium GPU**: If Chromium is slow, try adding `"chromium_args": ["--enable-gpu-rasterization"]`.
+
+### Wayland backend tips
+- **Sway config**: Edit `~/.config/sway/config` for output rotation, input mapping, etc.
+- **Chromium on Wayland**: Automatically uses `--ozone-platform=wayland`. GPU is disabled by default; override with `"chromium_args": ["--enable-gpu"]`.
+- **Image viewer**: Uses `imv` instead of `feh`.
+
+## Switching backends
+
+To migrate from X11 to Wayland:
+
+1. Edit `/etc/systemd/system/pi-display-server.service` and set `DISPLAY_BACKEND=wayland`
+2. Install Wayland dependencies: `sudo apt install sway swaybg wlr-randr imv`
+3. Run `DISPLAY_BACKEND=wayland bash install.sh <repo-url>` to create Sway config and boot files
+4. Reboot
+
+To rollback to X11: set `DISPLAY_BACKEND=x11` in the service file and reboot. The X11 boot files (`~/.xinitrc`) are preserved.

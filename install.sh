@@ -4,30 +4,30 @@ set -euo pipefail
 INSTALL_DIR="/opt/pi-display-server"
 SERVICE_NAME="pi-display-server"
 REPO_URL="${1:-}"
+BACKEND="${DISPLAY_BACKEND:-x11}"
 
-echo "=== Pi Display Server — Installer ==="
+echo "=== Pi Display Server — Installer (backend: ${BACKEND}) ==="
 
 if [ -z "${REPO_URL}" ]; then
     echo "Usage: bash install.sh <git-clone-url>"
     echo "  e.g. bash install.sh https://github.com/you/pi-display-server.git"
+    echo "  Set DISPLAY_BACKEND=wayland for Sway/Wayland mode."
     exit 1
 fi
 
 # --- Dependencies ----------------------------------------------------------
 echo "[1/6] Installing system dependencies…"
 sudo apt-get update -qq
-sudo apt-get install -y -qq \
-    git \
-    xserver-xorg \
-    xinit \
-    xinput \
-    openbox \
-    xdotool \
-    x11-utils \
-    mpv \
-    chromium \
-    feh \
-    python3
+
+COMMON_DEPS=(git mpv chromium python3)
+
+if [ "${BACKEND}" = "wayland" ]; then
+    sudo apt-get install -y -qq "${COMMON_DEPS[@]}" \
+        sway swaybg wlr-randr imv
+else
+    sudo apt-get install -y -qq "${COMMON_DEPS[@]}" \
+        xserver-xorg xinit xinput openbox xdotool x11-utils feh
+fi
 
 # --- Clone repo ------------------------------------------------------------
 echo "[2/6] Cloning repo to ${INSTALL_DIR}…"
@@ -51,6 +51,8 @@ sudo cp "${INSTALL_DIR}/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_
 CURRENT_USER="$(whoami)"
 sudo sed -i "s/^User=.*/User=${CURRENT_USER}/" "/etc/systemd/system/${SERVICE_NAME}.service"
 sudo sed -i "s|/home/pi/|/home/${CURRENT_USER}/|g" "/etc/systemd/system/${SERVICE_NAME}.service"
+sudo sed -i "s/^Environment=DISPLAY_BACKEND=.*/Environment=DISPLAY_BACKEND=${BACKEND}/" \
+    "/etc/systemd/system/${SERVICE_NAME}.service" || true
 
 sudo systemctl daemon-reload
 sudo systemctl enable "${SERVICE_NAME}"
@@ -58,14 +60,70 @@ sudo systemctl enable "${SERVICE_NAME}"
 # --- Boot files (only if missing) ------------------------------------------
 echo "[5/6] Setting up boot files…"
 
-if [ ! -f "$HOME/.xinitrc" ]; then
-    cat > "$HOME/.xinitrc" << 'XINITRC'
+if [ "${BACKEND}" = "wayland" ]; then
+    # --- Sway config ---
+    SWAY_DIR="$HOME/.config/sway"
+    mkdir -p "${SWAY_DIR}"
+    if [ ! -f "${SWAY_DIR}/config" ]; then
+        cat > "${SWAY_DIR}/config" << 'SWAYCONFIG'
+# Pi Display Server — Sway kiosk config
+output * bg #000000 solid_color
+output HDMI-A-1 transform 90
+
+input type:touch {
+    map_to_output HDMI-A-1
+}
+
+# All windows float, no borders
+default_border none
+default_floating_border none
+for_window [app_id=".*"] floating enable
+for_window [app_id=".*"] border none
+for_window [title=".*"] floating enable
+for_window [title=".*"] border none
+
+# Disable idle/screen blanking
+exec swaymsg idle_inhibit visible
+
+# Start display server
+exec sudo systemctl restart pi-display-server
+SWAYCONFIG
+        echo "  Created ${SWAY_DIR}/config"
+    else
+        echo "  ${SWAY_DIR}/config already exists, skipping"
+    fi
+
+    if [ ! -f "$HOME/.bash_profile" ]; then
+        cat > "$HOME/.bash_profile" << 'BASHPROFILE'
+if [ -z "$WAYLAND_DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  export XDG_SESSION_TYPE=wayland
+  exec sway
+fi
+BASHPROFILE
+        echo "  Created ~/.bash_profile (Wayland/Sway)"
+    elif grep -q startx "$HOME/.bash_profile" 2>/dev/null && ! grep -q 'exec sway' "$HOME/.bash_profile" 2>/dev/null; then
+        cp "$HOME/.bash_profile" "$HOME/.bash_profile.bak-x11"
+        cat > "$HOME/.bash_profile" << 'BASHPROFILE'
+if [ -z "$WAYLAND_DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  export XDG_SESSION_TYPE=wayland
+  exec sway
+fi
+BASHPROFILE
+        echo "  Migrated ~/.bash_profile startx → sway (backup: ~/.bash_profile.bak-x11)"
+    else
+        echo "  ~/.bash_profile already exists, skipping"
+    fi
+else
+    # --- X11 config ---
+    if [ ! -f "$HOME/.xinitrc" ]; then
+        cat > "$HOME/.xinitrc" << 'XINITRC'
 xset -dpms
 xset s off
 xset s noblank
 xrandr -o right
 
-# Touch/pointer mapping can appear late after X starts.
 if command -v xinput >/dev/null 2>&1; then
   touch_ids=""
   for _ in $(seq 1 20); do
@@ -84,20 +142,21 @@ sudo systemctl restart pi-display-server &
 
 exec openbox-session
 XINITRC
-    echo "  Created ~/.xinitrc"
-else
-    echo "  ~/.xinitrc already exists, skipping"
-fi
+        echo "  Created ~/.xinitrc"
+    else
+        echo "  ~/.xinitrc already exists, skipping"
+    fi
 
-if [ ! -f "$HOME/.bash_profile" ]; then
-    cat > "$HOME/.bash_profile" << 'BASHPROFILE'
+    if [ ! -f "$HOME/.bash_profile" ]; then
+        cat > "$HOME/.bash_profile" << 'BASHPROFILE'
 if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
   startx
 fi
 BASHPROFILE
-    echo "  Created ~/.bash_profile"
-else
-    echo "  ~/.bash_profile already exists, skipping"
+        echo "  Created ~/.bash_profile"
+    else
+        echo "  ~/.bash_profile already exists, skipping"
+    fi
 fi
 
 sudo mkdir -p /etc/systemd/system/getty@tty1.service.d

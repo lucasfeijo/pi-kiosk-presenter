@@ -2,10 +2,12 @@
 """
 Pi Display Server — remote control what your Raspberry Pi shows on HDMI.
 
-Runs an HTTP server that accepts JSON layout descriptions and manages X11
-windows accordingly (mpv for RTSP/video, chromium for web, feh for images, etc.).
+Runs an HTTP server that accepts JSON layout descriptions and manages display
+windows via a pluggable backend (X11 or Wayland/Sway).
 
-Requires: Python 3.9+, xdotool, xdpyinfo, mpv, chromium-browser, feh
+Requires: Python 3.9+, mpv, chromium-browser
+  X11 backend: xdotool, xdpyinfo, feh
+  Wayland backend: sway (swaymsg), imv
 """
 
 import json
@@ -21,6 +23,7 @@ import time
 from dataclasses import dataclass, field
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Event, Lock, RLock, Thread
+from abc import ABC, abstractmethod
 from typing import Optional
 
 logging.basicConfig(
@@ -54,6 +57,7 @@ INPUT_ROTATION_INTERVAL = max(
 INPUT_DEVICE_PATTERN = os.environ.get(
     "INPUT_DEVICE_PATTERN", r"(touch|stylus|mouse|tablet)"
 )
+DISPLAY_BACKEND = os.environ.get("DISPLAY_BACKEND", "x11").lower()
 
 
 def _chromium_user_data_dir(pane: dict) -> str:
@@ -136,62 +140,271 @@ def _rotation_to_matrix(rotation: str) -> Optional[tuple[str, ...]]:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Display Backend Interface
 # ---------------------------------------------------------------------------
 
-def get_screen_resolution(retries: int = 30, delay: float = 2.0) -> tuple[int, int]:
-    """Return (width, height) of the current X display, waiting for X if needed."""
-    for attempt in range(retries):
-        try:
-            out = subprocess.check_output(
-                ["xdpyinfo"], text=True, stderr=subprocess.DEVNULL
-            )
-            for line in out.splitlines():
-                if "dimensions:" in line:
-                    dims = line.split()[1]  # "1920x1080"
-                    w, h = dims.split("x")
-                    return int(w), int(h)
-        except subprocess.CalledProcessError:
-            pass
-        if attempt < retries - 1:
-            log.info("Waiting for X display… (attempt %d/%d)", attempt + 1, retries)
+class DisplayBackend(ABC):
+    """Abstract interface for display server operations (X11 or Wayland)."""
+
+    @abstractmethod
+    def get_screen_resolution(self) -> tuple[int, int]:
+        ...
+
+    @abstractmethod
+    def find_window(self, name: str, pid: int, retries: int = 10, delay: float = 0.5) -> Optional[int]:
+        ...
+
+    @abstractmethod
+    def position_window(self, wid: int, x: int, y: int, w: int, h: int):
+        ...
+
+    @abstractmethod
+    def raise_windows(self, layout: list[dict], panes: dict):
+        ...
+
+    @abstractmethod
+    def set_window_name(self, wid: int, name: str):
+        ...
+
+    @abstractmethod
+    def get_active_window(self) -> Optional[int]:
+        ...
+
+    @abstractmethod
+    def prepare_environment(self):
+        ...
+
+    @property
+    def is_wayland(self) -> bool:
+        return False
+
+    def launch_env(self) -> dict:
+        """Extra env vars to pass to child processes."""
+        return {}
+
+
+class X11Backend(DisplayBackend):
+    """X11 backend using xdotool, xdpyinfo, xprop."""
+
+    def get_screen_resolution(self) -> tuple[int, int]:
+        for attempt in range(30):
+            try:
+                out = subprocess.check_output(
+                    ["xdpyinfo"], text=True, stderr=subprocess.DEVNULL
+                )
+                for line in out.splitlines():
+                    if "dimensions:" in line:
+                        dims = line.split()[1]
+                        w, h = dims.split("x")
+                        return int(w), int(h)
+            except subprocess.CalledProcessError:
+                pass
+            if attempt < 29:
+                log.info("Waiting for X display… (attempt %d/30)", attempt + 1)
+                time.sleep(2.0)
+        raise RuntimeError("Could not connect to X display after 30 attempts")
+
+    def find_window(self, name, pid, retries=10, delay=0.5):
+        for _ in range(retries):
+            try:
+                out = subprocess.check_output(
+                    ["xdotool", "search", "--name", name],
+                    text=True, stderr=subprocess.DEVNULL,
+                ).strip()
+                if out:
+                    return int(out.strip().splitlines()[-1])
+            except subprocess.CalledProcessError:
+                pass
             time.sleep(delay)
-    raise RuntimeError("Could not connect to X display after %d attempts" % retries)
+        for _ in range(5):
+            try:
+                out = subprocess.check_output(
+                    ["xdotool", "search", "--pid", str(pid)],
+                    text=True, stderr=subprocess.DEVNULL,
+                ).strip()
+                if out:
+                    return int(out.strip().splitlines()[-1])
+            except subprocess.CalledProcessError:
+                pass
+            time.sleep(delay)
+        return None
 
+    def position_window(self, wid, x, y, w, h):
+        subprocess.run(
+            ["xdotool", "windowstate", "--remove", "MAXIMIZED_VERT", str(wid)],
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["xdotool", "windowstate", "--remove", "MAXIMIZED_HORZ", str(wid)],
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(0.1)
+        subprocess.run(
+            ["xdotool", "windowmove", "--sync", str(wid), str(x), str(y)],
+            check=True,
+        )
+        subprocess.run(
+            ["xdotool", "windowsize", "--sync", str(wid), str(w), str(h)],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "xprop", "-id", str(wid),
+                "-f", "_MOTIF_WM_HINTS", "32c",
+                "-set", "_MOTIF_WM_HINTS", "2, 0, 0, 0, 0",
+            ],
+            stderr=subprocess.DEVNULL,
+        )
 
-def find_window_by_pid(pid: int, retries: int = 30, delay: float = 0.5) -> Optional[int]:
-    """Try to find an X window ID owned by *pid*.  Returns None on failure."""
-    for _ in range(retries):
+    def raise_windows(self, layout, panes):
+        indexed = list(enumerate(layout))
+        indexed.sort(key=lambda iv: _pane_stack_sort_key(iv[1], iv[0]))
+        for _, pane in indexed:
+            name = pane.get("name", pane.get("type", ""))
+            mp = panes.get(name)
+            wid = mp.wid if mp and mp.wid else None
+            if wid:
+                subprocess.run(
+                    ["xdotool", "windowraise", str(wid)],
+                    stderr=subprocess.DEVNULL,
+                )
+
+    def set_window_name(self, wid, name):
+        subprocess.run(
+            ["xdotool", "set_window", "--name", name, str(wid)],
+            stderr=subprocess.DEVNULL,
+        )
+
+    def get_active_window(self):
         try:
             out = subprocess.check_output(
-                ["xdotool", "search", "--pid", str(pid)],
-                text=True,
-                stderr=subprocess.DEVNULL,
+                ["xdotool", "getactivewindow"],
+                text=True, stderr=subprocess.DEVNULL,
             ).strip()
             if out:
-                # May return multiple lines — take the last (usually the real window)
-                return int(out.strip().splitlines()[-1])
-        except subprocess.CalledProcessError:
+                return int(out)
+        except Exception:
             pass
-        time.sleep(delay)
-    return None
+        return None
+
+    def prepare_environment(self):
+        if "DISPLAY" not in os.environ:
+            os.environ["DISPLAY"] = ":0"
 
 
-def find_window_by_name(name: str, retries: int = 30, delay: float = 0.5) -> Optional[int]:
-    """Try to find an X window by name/title substring."""
-    for _ in range(retries):
+class WaylandBackend(DisplayBackend):
+    """Wayland backend using Sway IPC (swaymsg)."""
+
+    @property
+    def is_wayland(self) -> bool:
+        return True
+
+    def get_screen_resolution(self) -> tuple[int, int]:
+        for attempt in range(30):
+            try:
+                out = subprocess.check_output(
+                    ["swaymsg", "-t", "get_outputs", "--raw"],
+                    text=True, stderr=subprocess.DEVNULL,
+                )
+                for o in json.loads(out):
+                    if o.get("active"):
+                        rect = o.get("rect", {})
+                        return rect.get("width", 1920), rect.get("height", 1080)
+            except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError):
+                pass
+            if attempt < 29:
+                log.info("Waiting for Sway compositor… (attempt %d/30)", attempt + 1)
+                time.sleep(2.0)
+        raise RuntimeError("Could not connect to Sway compositor after 30 attempts")
+
+    def _walk_tree(self, node):
+        """Recursively yield all window nodes from the Sway tree."""
+        if node.get("pid") and node.get("type") == "con":
+            yield node
+        for child in node.get("nodes", []) + node.get("floating_nodes", []):
+            yield from self._walk_tree(child)
+
+    def _get_tree(self):
+        out = subprocess.check_output(
+            ["swaymsg", "-t", "get_tree", "--raw"],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+        return json.loads(out)
+
+    def find_window(self, name, pid, retries=10, delay=0.5):
+        for _ in range(retries):
+            try:
+                tree = self._get_tree()
+                for node in self._walk_tree(tree):
+                    node_name = node.get("name", "")
+                    if node_name and name in node_name:
+                        return node["id"]
+                for node in self._walk_tree(tree):
+                    if node.get("pid") == pid:
+                        return node["id"]
+            except Exception:
+                pass
+            time.sleep(delay)
+        return None
+
+    def position_window(self, wid, x, y, w, h):
+        cmd = (
+            f"[con_id={wid}] floating enable, "
+            f"border none, "
+            f"move position {x} {y}, "
+            f"resize set {w} {h}"
+        )
+        subprocess.run(
+            ["swaymsg", cmd],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    def raise_windows(self, layout, panes):
+        indexed = list(enumerate(layout))
+        indexed.sort(key=lambda iv: _pane_stack_sort_key(iv[1], iv[0]))
+        for _, pane in indexed:
+            name = pane.get("name", pane.get("type", ""))
+            mp = panes.get(name)
+            wid = mp.wid if mp and mp.wid else None
+            if wid:
+                subprocess.run(
+                    ["swaymsg", f"[con_id={wid}] focus"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+
+    def set_window_name(self, wid, name):
+        subprocess.run(
+            ["swaymsg", f'[con_id={wid}] title_format "{name}"'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    def get_active_window(self):
         try:
-            out = subprocess.check_output(
-                ["xdotool", "search", "--name", name],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            ).strip()
-            if out:
-                return int(out.strip().splitlines()[-1])
-        except subprocess.CalledProcessError:
-            pass
-        time.sleep(delay)
-    return None
+            tree = self._get_tree()
+            return self._find_focused(tree)
+        except Exception:
+            return None
+
+    def _find_focused(self, node):
+        if node.get("focused") and node.get("pid"):
+            return node.get("id")
+        for child in node.get("nodes", []) + node.get("floating_nodes", []):
+            result = self._find_focused(child)
+            if result:
+                return result
+        return None
+
+    def prepare_environment(self):
+        if "WAYLAND_DISPLAY" not in os.environ:
+            os.environ["WAYLAND_DISPLAY"] = "wayland-1"
+        if "XDG_RUNTIME_DIR" not in os.environ:
+            os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+
+    def launch_env(self) -> dict:
+        return {
+            "WAYLAND_DISPLAY": os.environ.get("WAYLAND_DISPLAY", "wayland-1"),
+            "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"),
+        }
 
 
 def _pane_stack_sort_key(pane: dict, index: int) -> tuple[int, int]:
@@ -204,52 +417,12 @@ def _pane_stack_sort_key(pane: dict, index: int) -> tuple[int, int]:
     return (o, index)
 
 
-def raise_window_stack(layout: list[dict], panes: dict[str, "ManagedPane"]):
-    """Raise each mapped window in stack order (last raised ends on top)."""
-    indexed = list(enumerate(layout))
-    indexed.sort(key=lambda iv: _pane_stack_sort_key(iv[1], iv[0]))
-    for _, pane in indexed:
-        name = pane.get("name", pane.get("type", ""))
-        mp = panes.get(name)
-        wid = mp.wid if mp and mp.wid else None
-        if wid:
-            subprocess.run(
-                ["xdotool", "windowraise", str(wid)],
-                stderr=subprocess.DEVNULL,
-            )
-
-
-def position_window(wid: int, x: int, y: int, w: int, h: int):
-    """Move and resize a window by its X window id."""
-    # Remove any maximized / fullscreen state first so resize works
-    subprocess.run(
-        ["xdotool", "windowstate", "--remove", "MAXIMIZED_VERT", str(wid)],
-        stderr=subprocess.DEVNULL,
-    )
-    subprocess.run(
-        ["xdotool", "windowstate", "--remove", "MAXIMIZED_HORZ", str(wid)],
-        stderr=subprocess.DEVNULL,
-    )
-    # Some WMs need a small delay after state change
-    time.sleep(0.1)
-    subprocess.run(
-        ["xdotool", "windowmove", "--sync", str(wid), str(x), str(y)],
-        check=True,
-    )
-    subprocess.run(
-        ["xdotool", "windowsize", "--sync", str(wid), str(w), str(h)],
-        check=True,
-    )
-    # Remove window decorations via xprop (works with most WMs)
-    subprocess.run(
-        [
-            "xprop",
-            "-id", str(wid),
-            "-f", "_MOTIF_WM_HINTS", "32c",
-            "-set", "_MOTIF_WM_HINTS", "2, 0, 0, 0, 0",
-        ],
-        stderr=subprocess.DEVNULL,
-    )
+def create_backend() -> DisplayBackend:
+    if DISPLAY_BACKEND == "wayland":
+        log.info("Using Wayland/Sway display backend")
+        return WaylandBackend()
+    log.info("Using X11 display backend")
+    return X11Backend()
 
 
 # ---------------------------------------------------------------------------
@@ -294,10 +467,11 @@ class ManagedPane:
 class DisplayManager:
     """Keeps track of all running panes and their processes."""
 
-    def __init__(self):
+    def __init__(self, backend: DisplayBackend):
+        self.backend = backend
         self.panes: dict[str, ManagedPane] = {}
         self.lock = RLock()
-        self.screen_w, self.screen_h = get_screen_resolution()
+        self.screen_w, self.screen_h = backend.get_screen_resolution()
         self._current_layout: list[dict] = []
         self._stop_event = Event()
         self._input_pattern = re.compile(INPUT_DEVICE_PATTERN, flags=re.IGNORECASE)
@@ -306,10 +480,12 @@ class DisplayManager:
         self._xinput_missing_logged = False
         self._watchdog_thread = Thread(target=self._watchdog, daemon=True)
         self._watchdog_thread.start()
-        self._input_thread = Thread(target=self._input_rotation_guard, daemon=True)
-        self._input_thread.start()
-        self._apply_input_rotation()
-        log.info("Screen resolution: %dx%d", self.screen_w, self.screen_h)
+        if not backend.is_wayland:
+            self._input_thread = Thread(target=self._input_rotation_guard, daemon=True)
+            self._input_thread.start()
+            self._apply_input_rotation()
+        log.info("Screen resolution: %dx%d (backend=%s)",
+                 self.screen_w, self.screen_h, type(backend).__name__)
 
     # -- layout persistence -------------------------------------------------
 
@@ -394,7 +570,6 @@ class DisplayManager:
         url = pane["url"]
         extra = pane.get("chromium_args", [])
         x, y, w, h = geom
-        # Each web pane gets its own user-data-dir so multiple instances work
         name = pane.get("name", "web")
         data_dir = _chromium_user_data_dir(pane)
         cmd = [
@@ -415,13 +590,18 @@ class DisplayManager:
             "--memory-model=low",
             "--process-per-site",
             "--renderer-process-limit=2",
-            f"--window-position={x},{y}",
             f"--window-size={w},{h}",
             f"--user-data-dir={data_dir}",
-            *extra,
         ]
+        if self.backend.is_wayland:
+            cmd += [
+                "--ozone-platform=wayland",
+                "--enable-features=UseOzonePlatform",
+            ]
+        else:
+            cmd.append(f"--window-position={x},{y}")
+        cmd.extend(extra)
         log.info("Launching chromium: %s", " ".join(cmd))
-        # Low CPU priority so it doesn't starve mpv
         return subprocess.Popen(
             ["nice", "-n", "10", *cmd],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -431,13 +611,22 @@ class DisplayManager:
         path = pane["path"]
         x, y, w, h = geom
         name = pane.get("name", "image")
-        cmd = ["feh", f"--title={name}", "--scale-down", "--auto-zoom", "--borderless",
-               f"--geometry={w}x{h}+{x}+{y}", path]
-        log.info("Launching feh: %s", " ".join(cmd))
+        if self.backend.is_wayland:
+            cmd = [
+                "imv", "-f",
+                f"--title={name}",
+                path,
+            ]
+        else:
+            cmd = [
+                "feh", f"--title={name}", "--scale-down", "--auto-zoom", "--borderless",
+                f"--geometry={w}x{h}+{x}+{y}", path,
+            ]
+        log.info("Launching image viewer: %s", " ".join(cmd))
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def _launch_command(self, pane: dict, geom: tuple[int, int, int, int]) -> subprocess.Popen:
-        """Generic: run any command that creates an X window."""
+        """Generic: run any command that creates a window."""
         cmd = pane["cmd"]
         if isinstance(cmd, str):
             cmd = cmd.split()
@@ -511,25 +700,20 @@ class DisplayManager:
             for t in threads:
                 t.join(timeout=120)
             with self.lock:
-                raise_window_stack(layout, self.panes)
+                self.backend.raise_windows(layout, self.panes)
 
         Thread(target=position_all_then_stack, daemon=True).start()
 
     def _position_pane(self, pane: dict, name: str, proc: subprocess.Popen, geom: tuple):
         """Find and position a pane's window (runs in a background thread)."""
         x, y, w, h = geom
-        wid = find_window_by_name(name, retries=10, delay=0.5)
-        if wid is None:
-            wid = find_window_by_pid(proc.pid, retries=5, delay=0.5)
+        wid = self.backend.find_window(name, proc.pid, retries=10, delay=0.5)
 
         if wid:
-            position_window(wid, x, y, w, h)
+            self.backend.position_window(wid, x, y, w, h)
             time.sleep(0.3)
-            position_window(wid, x, y, w, h)
-            subprocess.run(
-                ["xdotool", "set_window", "--name", name, str(wid)],
-                stderr=subprocess.DEVNULL,
-            )
+            self.backend.position_window(wid, x, y, w, h)
+            self.backend.set_window_name(wid, name)
             with self.lock:
                 if name in self.panes:
                     self.panes[name].wid = wid
@@ -543,7 +727,7 @@ class DisplayManager:
             if auto_refresh > 0 and pane.get("type") in ("web", "browser"):
                 self._start_auto_refresh(name, pane, auto_refresh)
         else:
-            log.warning("Pane '%s': could not find X window (pid=%d)", name, proc.pid)
+            log.warning("Pane '%s': could not find window (pid=%d)", name, proc.pid)
 
     def add_pane(self, pane: dict):
         """Add a single pane without disturbing existing ones."""
@@ -700,7 +884,7 @@ class DisplayManager:
         proc = launcher(self, pane, geom)
         self.panes[name] = ManagedPane(name=name, ptype=ptype, proc=proc)
         self._position_pane(pane, name, proc, geom)
-        raise_window_stack(self._current_layout, self.panes)
+        self.backend.raise_windows(self._current_layout, self.panes)
 
     def _watchdog(self):
         """Poll child processes and re-launch any that have exited."""
@@ -851,11 +1035,8 @@ class DisplayManager:
                     continue
 
                 try:
-                    out = subprocess.check_output(
-                        ["xdotool", "getactivewindow"],
-                        text=True, stderr=subprocess.DEVNULL,
-                    ).strip()
-                    if out and int(out) == wid:
+                    active = self.backend.get_active_window()
+                    if active is not None and active == wid:
                         last_activity = time.time()
                 except Exception:
                     pass
@@ -1723,11 +1904,10 @@ def main():
     host = os.environ.get("DISPLAY_HOST", "0.0.0.0")
     port = int(os.environ.get("DISPLAY_PORT", "8686"))
 
-    # Make sure DISPLAY is set (needed when run from systemd)
-    if "DISPLAY" not in os.environ:
-        os.environ["DISPLAY"] = ":0"
+    backend = create_backend()
+    backend.prepare_environment()
 
-    dm = DisplayManager()
+    dm = DisplayManager(backend)
     dm.load_saved_layout()
 
     server = HTTPServer((host, port), Handler)

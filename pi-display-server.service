@@ -9,9 +9,35 @@ Type=simple
 User=pi
 Environment=XAUTHORITY=/home/pi/.Xauthority
 Environment=DISPLAY_PORT=8686
+# Set to x11 or wayland:
+Environment=DISPLAY_BACKEND=x11
 # Set to 0 to disable HTTPS and use plain HTTP instead:
 Environment=SSL_SELFSIGNED=1
-ExecStart=/bin/bash -lc 'for i in $(seq 1 30); do for d in :0 :1 :2; do if DISPLAY="$d" XAUTHORITY="/home/pi/.Xauthority" xdpyinfo >/dev/null 2>&1; then export DISPLAY="$d"; exec /usr/bin/python3 /opt/pi-display-server/display_server.py; fi; done; sleep 2; done; echo "No X display available" >&2; exit 1'
+ExecStart=/bin/bash -lc '\
+  BACKEND="${DISPLAY_BACKEND:-x11}"; \
+  if [ "$BACKEND" = "wayland" ]; then \
+    export XDG_RUNTIME_DIR="/run/user/$(id -u)"; \
+    for i in $(seq 1 30); do \
+      SWAYSOCK=$(find "$XDG_RUNTIME_DIR" -maxdepth 1 -name "sway-ipc.*.sock" 2>/dev/null | head -1); \
+      if [ -n "$SWAYSOCK" ]; then \
+        export SWAYSOCK WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"; \
+        exec /usr/bin/python3 /opt/pi-display-server/display_server.py; \
+      fi; \
+      sleep 2; \
+    done; \
+    echo "No Sway socket found" >&2; exit 1; \
+  else \
+    for i in $(seq 1 30); do \
+      for d in :0 :1 :2; do \
+        if DISPLAY="$d" XAUTHORITY="/home/pi/.Xauthority" xdpyinfo >/dev/null 2>&1; then \
+          export DISPLAY="$d"; \
+          exec /usr/bin/python3 /opt/pi-display-server/display_server.py; \
+        fi; \
+      done; \
+      sleep 2; \
+    done; \
+    echo "No X display available" >&2; exit 1; \
+  fi'
 Restart=on-failure
 RestartSec=1
 TimeoutStopSec=3
