@@ -11,6 +11,7 @@ Requires: Python 3.9+, xdotool, xdpyinfo, mpv, chromium-browser, feh
 import json
 import logging
 import os
+import re
 import shlex
 import signal
 import ssl
@@ -45,6 +46,13 @@ _DEFAULT_CHROMIUM_ROOT = os.path.join(
 )
 CHROMIUM_USER_DATA_ROOT = os.environ.get(
     "CHROMIUM_USER_DATA_ROOT", _DEFAULT_CHROMIUM_ROOT
+)
+INPUT_ROTATION = os.environ.get("INPUT_ROTATION", "right").strip().lower()
+INPUT_ROTATION_INTERVAL = max(
+    2.0, float(os.environ.get("INPUT_ROTATION_INTERVAL", "15"))
+)
+INPUT_DEVICE_PATTERN = os.environ.get(
+    "INPUT_DEVICE_PATTERN", r"(touch|stylus|mouse|tablet)"
 )
 
 
@@ -114,6 +122,17 @@ def _mpv_rtsp_perf_args(pane: dict) -> list[str]:
     if extra:
         args.extend(shlex.split(extra))
     return args
+
+
+def _rotation_to_matrix(rotation: str) -> Optional[tuple[str, ...]]:
+    """Map xrandr rotation to xinput coordinate transformation matrix."""
+    matrices = {
+        "normal": ("1", "0", "0", "0", "1", "0", "0", "0", "1"),
+        "left": ("0", "-1", "1", "1", "0", "0", "0", "0", "1"),
+        "right": ("0", "1", "0", "-1", "0", "1", "0", "0", "1"),
+        "inverted": ("-1", "0", "1", "0", "-1", "1", "0", "0", "1"),
+    }
+    return matrices.get(rotation)
 
 
 # ---------------------------------------------------------------------------
@@ -281,8 +300,15 @@ class DisplayManager:
         self.screen_w, self.screen_h = get_screen_resolution()
         self._current_layout: list[dict] = []
         self._stop_event = Event()
+        self._input_pattern = re.compile(INPUT_DEVICE_PATTERN, flags=re.IGNORECASE)
+        self._input_matrix = _rotation_to_matrix(INPUT_ROTATION)
+        self._input_state: dict[int, bool] = {}
+        self._xinput_missing_logged = False
         self._watchdog_thread = Thread(target=self._watchdog, daemon=True)
         self._watchdog_thread.start()
+        self._input_thread = Thread(target=self._input_rotation_guard, daemon=True)
+        self._input_thread.start()
+        self._apply_input_rotation()
         log.info("Screen resolution: %dx%d", self.screen_w, self.screen_h)
 
     # -- layout persistence -------------------------------------------------
@@ -694,6 +720,110 @@ class DisplayManager:
                         self._add_pane(pane_def)
                     except Exception:
                         log.exception("Failed to restart pane '%s'", name)
+
+    def _input_rotation_guard(self):
+        """Keep pointer coordinate matrix synced with the current screen rotation."""
+        while not self._stop_event.wait(INPUT_ROTATION_INTERVAL):
+            self._apply_input_rotation()
+
+    def _apply_input_rotation(self):
+        """Re-apply rotation matrix to matching input devices when needed."""
+        if not self._input_matrix:
+            return
+        try:
+            out = subprocess.check_output(
+                ["xinput", "--list", "--short"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            if not self._xinput_missing_logged:
+                self._xinput_missing_logged = True
+                log.warning("xinput not found; skipping input rotation sync")
+            return
+        except Exception as e:
+            log.debug("Input rotation sync skipped: %s", e)
+            return
+
+        seen_ids: set[int] = set()
+        for line in out.splitlines():
+            low = line.lower()
+            if "slave" not in low or "pointer" not in low:
+                continue
+            if "virtual core" in low or "xwayland" in low:
+                continue
+            if not self._input_pattern.search(low):
+                continue
+            match = re.search(r"\bid=(\d+)\b", line)
+            if not match:
+                continue
+            dev_id = int(match.group(1))
+            seen_ids.add(dev_id)
+            if self._input_has_expected_matrix(dev_id):
+                self._input_state[dev_id] = True
+                continue
+            if not self._set_input_matrix(dev_id):
+                self._input_state[dev_id] = False
+                continue
+            self._input_state[dev_id] = True
+            log.info("Applied input rotation matrix '%s' to device id=%d", INPUT_ROTATION, dev_id)
+
+        stale = [dev_id for dev_id in self._input_state if dev_id not in seen_ids]
+        for dev_id in stale:
+            self._input_state.pop(dev_id, None)
+
+    def _set_input_matrix(self, dev_id: int) -> bool:
+        """Set the Coordinate Transformation Matrix if the device supports it."""
+        try:
+            props = subprocess.check_output(
+                ["xinput", "list-props", str(dev_id)],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return False
+        if "Coordinate Transformation Matrix" not in props:
+            return False
+        cmd = [
+            "xinput",
+            "set-prop",
+            str(dev_id),
+            "Coordinate Transformation Matrix",
+            *self._input_matrix,
+        ]
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return result.returncode == 0
+
+    def _input_has_expected_matrix(self, dev_id: int) -> bool:
+        """Check if device matrix already matches configured rotation."""
+        if not self._input_matrix:
+            return True
+        try:
+            out = subprocess.check_output(
+                ["xinput", "list-props", str(dev_id)],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return False
+        for line in out.splitlines():
+            if "Coordinate Transformation Matrix" not in line:
+                continue
+            raw = line.split(":", 1)[-1]
+            parts = [p.strip() for p in raw.split(",") if p.strip()]
+            if len(parts) != 9:
+                return False
+            try:
+                normalized = tuple(str(int(round(float(v)))) for v in parts)
+            except ValueError:
+                return False
+            return normalized == self._input_matrix
+        return False
 
     def stop_watchdog(self):
         self._stop_event.set()
