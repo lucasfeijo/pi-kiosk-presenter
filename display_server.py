@@ -1528,10 +1528,10 @@ setInterval(refreshStatus, 5000);
     def _serve_stats(self):
         """Standalone system-stats page for the 'stats' pane type."""
         html = """<!DOCTYPE html>
-<html lang="en"><head>
+<html lang="pt-BR"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pi Stats</title>
+<title>Estatísticas do Sistema</title>
 <style>
 *,*::before,*::after{box-sizing:border-box}
 body{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:0;background:#0d1117;color:#e6edf3;
@@ -1557,11 +1557,11 @@ h1{font-size:.9rem;margin:0 0 10px;color:#58a6ff;text-align:center;letter-spacin
 .badge.alive{background:#238636;color:#fff}.badge.dead{background:#da3633;color:#fff}
 </style></head><body>
 <div class="wrap">
-<h1>System Stats</h1>
+<h1>Estatísticas do Sistema</h1>
 <div class="grid" id="grid"></div>
 <div class="footer" id="footer"></div>
 <div class="panes-section">
-<h2>Panes</h2>
+<h2>Janelas</h2>
 <div id="pane-list"></div>
 </div>
 </div>
@@ -1602,11 +1602,11 @@ function renderStats(s) {
   const items = [
     { lbl: "CPU", val: cpuPct != null ? cpuPct + "%" : "\\u2014", pct: cpuPct,
       sub: s.cpu_count ? s.cpu_count + " cores" : "" },
-    { lbl: "Memory", val: s.mem_used_mb != null ? s.mem_used_mb + " / " + s.mem_total_mb + " MB" : "\\u2014",
+    { lbl: "Memória", val: s.mem_used_mb != null ? s.mem_used_mb + " / " + s.mem_total_mb + " MB" : "\\u2014",
       pct: memPct, sub: "" },
-    { lbl: "Temp", val: s.cpu_temp_c != null ? s.cpu_temp_c + " \\u00b0C" : "\\u2014",
+    { lbl: "Temperatura", val: s.cpu_temp_c != null ? s.cpu_temp_c + " \\u00b0C" : "\\u2014",
       pct: s.cpu_temp_c != null ? Math.min(100, Math.round(s.cpu_temp_c / 85 * 100)) : null, sub: "" },
-    { lbl: "Disk", val: s.disk_used_gb != null ? s.disk_used_gb + " / " + s.disk_total_gb + " GB" : "\\u2014",
+    { lbl: "Disco", val: s.disk_used_gb != null ? s.disk_used_gb + " / " + s.disk_total_gb + " GB" : "\\u2014",
       pct: diskPct, sub: "" }
   ];
 
@@ -1619,8 +1619,8 @@ function renderStats(s) {
   }).join("");
 
   const parts = [];
-  if (s.load_1 != null) parts.push("Load: " + s.load_1 + " / " + s.load_5 + " / " + s.load_15);
-  if (s.uptime_sec != null) parts.push("Uptime: " + fmtUptime(s.uptime_sec));
+  if (s.load_1 != null) parts.push("Carga: " + s.load_1 + " / " + s.load_5 + " / " + s.load_15);
+  if (s.uptime_sec != null) parts.push("Tempo de execução: " + fmtUptime(s.uptime_sec));
   document.getElementById("footer").textContent = parts.join("  \\u00b7  ");
 }
 
