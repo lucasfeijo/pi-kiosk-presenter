@@ -7,7 +7,9 @@ SERVICE_NAME="pi-display-server"
 cd "${INSTALL_DIR}"
 
 echo "Pulling latest…"
-sudo git pull
+sudo git fetch --prune origin
+# Keep kiosk code exactly aligned with remote main, even after rewritten history.
+sudo git reset --hard origin/main
 sudo chown -R "$(whoami)" "${INSTALL_DIR}"
 
 if ! command -v xdpyinfo >/dev/null 2>&1; then
