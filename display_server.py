@@ -540,7 +540,7 @@ class DisplayManager:
                 auto_refresh = float(auto_refresh or 0)
             except (TypeError, ValueError):
                 auto_refresh = 0
-            if auto_refresh > 0 and pane.get("type") in ("web", "browser"):
+            if auto_refresh > 0 and pane.get("type") in ("web", "browser", "rtsp", "stream"):
                 self._start_auto_refresh(name, pane, auto_refresh)
         else:
             log.warning("Pane '%s': could not find X window (pid=%d)", name, proc.pid)
@@ -829,9 +829,19 @@ class DisplayManager:
         self._stop_event.set()
 
     def _start_auto_refresh(self, name: str, pane_def: dict, interval_min: float):
-        """Start a background thread that restarts the pane after *interval_min* idle minutes."""
+        """Start a background thread that restarts the pane on a timer.
+
+        Web panes: timer resets whenever the pane is the active window, so the
+        restart only fires after *interval_min* idle minutes. Other panes
+        (rtsp/stream) have no user interaction, so they hard reload on a fixed
+        schedule every *interval_min* minutes.
+        """
         mp = self.panes.get(name)
-        if not mp or not mp.wid or interval_min <= 0:
+        if not mp or interval_min <= 0:
+            return
+        ptype = pane_def.get("type", "")
+        is_web = ptype in ("web", "browser")
+        if is_web and not mp.wid:
             return
         self._stop_auto_refresh(name)
 
@@ -846,22 +856,23 @@ class DisplayManager:
                 cur_mp = self.panes.get(name)
                 if not cur_mp or stop.is_set():
                     break
-                wid = cur_mp.wid
-                if not wid:
-                    continue
 
-                try:
-                    out = subprocess.check_output(
-                        ["xdotool", "getactivewindow"],
-                        text=True, stderr=subprocess.DEVNULL,
-                    ).strip()
-                    if out and int(out) == wid:
-                        last_activity = time.time()
-                except Exception:
-                    pass
+                if is_web:
+                    wid = cur_mp.wid
+                    if not wid:
+                        continue
+                    try:
+                        out = subprocess.check_output(
+                            ["xdotool", "getactivewindow"],
+                            text=True, stderr=subprocess.DEVNULL,
+                        ).strip()
+                        if out and int(out) == wid:
+                            last_activity = time.time()
+                    except Exception:
+                        pass
 
                 if time.time() - last_activity >= interval_sec:
-                    log.info("Auto-refreshing pane '%s' (idle %.0fs) — full restart",
+                    log.info("Auto-refreshing pane '%s' (elapsed %.0fs) — full restart",
                              name, time.time() - last_activity)
                     stop.set()
                     # Clear our own thread refs so _kill_pane won't try to join us
@@ -879,7 +890,8 @@ class DisplayManager:
         t = Thread(target=_loop, daemon=True, name=f"auto-refresh-{name}")
         mp._refresh_thread = t
         t.start()
-        log.info("Auto-refresh started for '%s': every %.1f min (full restart)", name, interval_min)
+        mode = "idle" if is_web else "scheduled"
+        log.info("Auto-refresh started for '%s': every %.1f min (%s restart)", name, interval_min, mode)
 
     def _stop_auto_refresh(self, name: str):
         """Stop the auto-refresh thread for a pane, if running."""
@@ -1104,8 +1116,8 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
     </select>
     <label class="inline"><input type="checkbox" id="p-audio" onchange="updateAudio(this.checked)"> Decode audio</label>
     </div>
-    <div id="web-extra" style="display:none">
-    <label title="Reload the page after this many idle minutes (0 = off). Any interaction resets the timer.">Auto-refresh (min)</label>
+    <div id="autorefresh-extra" style="display:none">
+    <label title="Reload every N minutes (0 = off). Web panes reset the timer on interaction; rtsp streams hard reload on schedule.">Auto-refresh (min)</label>
     <input id="p-autorefresh" type="number" step="1" min="0" onchange="updateAutoRefresh(this.value)">
     </div>
     <label title="Higher value draws on top when panes overlap">Stack order</label>
@@ -1208,8 +1220,8 @@ function showProps() {{
   document.getElementById("p-hwdec").value = p.hwdec || "";
   document.getElementById("p-rtsp-t").value = p.rtsp_transport || "";
   document.getElementById("p-audio").checked = !!p.audio;
-  const webEx = document.getElementById("web-extra");
-  webEx.style.display = isWeb ? "block" : "none";
+  const arEx = document.getElementById("autorefresh-extra");
+  arEx.style.display = (isWeb || isRtsp) ? "block" : "none";
   document.getElementById("p-autorefresh").value = p.auto_refresh || "";
   document.getElementById("p-x").value = round(p.x || 0);
   document.getElementById("p-y").value = round(p.y || 0);
