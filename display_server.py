@@ -1226,6 +1226,15 @@ h1{{font-size:1.3rem;margin:0;color:#58a6ff;line-height:1.6}}
 .pane-item:hover{{background:#21262d}}
 .pane-item.selected{{border-color:#f0883e;background:#21262d}}
 .pane-item .type{{color:#8b949e;font-size:11px}}
+.pane-item-right{{display:flex;align-items:center;gap:6px}}
+.pane-item-actions{{display:none;gap:4px}}
+.pane-item.selected .pane-item-actions{{display:flex}}
+.pane-act{{background:#30363d;color:#e6edf3;border:none;border-radius:999px;
+  width:22px;height:22px;font-size:12px;line-height:1;cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;padding:0}}
+.pane-act:hover{{background:#3d444d}}
+.pane-act.danger{{background:#da3633;color:#fff}}
+.pane-act.danger:hover{{background:#e5534b}}
 label{{display:block;font-size:12px;color:#8b949e;margin:8px 0 3px}}
 input,select{{width:100%;padding:6px 8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;
   border-radius:4px;font-size:13px;font-family:inherit}}
@@ -1352,10 +1361,6 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
       <div><label>Y</label><input id="p-y" type="number" step="0.01" min="0" max="1" onchange="updateCoord('y',this.value)"></div>
       <div><label>W</label><input id="p-w" type="number" step="0.01" min="0.02" max="1" onchange="updateCoord('w',this.value)"></div>
       <div><label>H</label><input id="p-h" type="number" step="0.01" min="0.02" max="1" onchange="updateCoord('h',this.value)"></div>
-    </div>
-    <div class="actions">
-      <button class="btn-secondary btn-sm" onclick="refreshSelected()">Refresh Pane</button>
-      <button class="btn-danger btn-sm" onclick="deleteSelected()">Delete Pane</button>
     </div>
   </div>
 </div>
@@ -1580,7 +1585,31 @@ function renderList() {{
   layout.forEach((p, i) => {{
     const el = document.createElement("div");
     el.className = "pane-item" + (i === selectedIdx ? " selected" : "");
-    el.innerHTML = '<span>' + (p.name || "unnamed") + '</span><span class="type">' + (p.type || "?") + '</span>';
+    const name = document.createElement("span");
+    name.textContent = p.name || "unnamed";
+    const right = document.createElement("span");
+    right.className = "pane-item-right";
+    const type = document.createElement("span");
+    type.className = "type";
+    type.textContent = p.type || "?";
+    const actions = document.createElement("span");
+    actions.className = "pane-item-actions";
+    const ref = document.createElement("button");
+    ref.className = "pane-act";
+    ref.title = "Restart this pane's process";
+    ref.innerHTML = "&#x21bb;";
+    ref.onclick = (e) => {{ e.stopPropagation(); refreshSelected(); }};
+    const del = document.createElement("button");
+    del.className = "pane-act danger";
+    del.title = "Delete this pane";
+    del.innerHTML = "&times;";
+    del.onclick = (e) => {{ e.stopPropagation(); deleteSelected(); }};
+    actions.appendChild(ref);
+    actions.appendChild(del);
+    right.appendChild(type);
+    right.appendChild(actions);
+    el.appendChild(name);
+    el.appendChild(right);
     el.onclick = () => select(i);
     list.appendChild(el);
   }});
