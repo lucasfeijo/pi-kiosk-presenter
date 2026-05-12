@@ -299,6 +299,10 @@ class DisplayManager:
         self.lock = RLock()
         self.screen_w, self.screen_h = get_screen_resolution()
         self._current_layout: list[dict] = []
+        self._screens_doc: dict = {
+            "screens": [{"name": "Default", "panes": []}],
+            "playingIndex": 0,
+        }
         self._stop_event = Event()
         self._input_pattern = re.compile(INPUT_DEVICE_PATTERN, flags=re.IGNORECASE)
         self._input_matrix = _rotation_to_matrix(INPUT_ROTATION)
@@ -313,28 +317,113 @@ class DisplayManager:
 
     # -- layout persistence -------------------------------------------------
 
+    def _sync_playing_panes(self):
+        """Mirror the live `_current_layout` into the playing screen slot."""
+        screens = self._screens_doc.get("screens") or []
+        if not screens:
+            self._screens_doc["screens"] = [{"name": "Default", "panes": list(self._current_layout)}]
+            self._screens_doc["playingIndex"] = 0
+            return
+        idx = self._screens_doc.get("playingIndex", 0)
+        if idx < 0 or idx >= len(screens):
+            idx = 0
+            self._screens_doc["playingIndex"] = 0
+        screens[idx]["panes"] = list(self._current_layout)
+
     def _save_layout(self):
-        """Persist the current layout definition to disk."""
+        """Persist the screens document to disk (auto-syncs the playing slot)."""
         try:
+            self._sync_playing_panes()
             with open(LAYOUT_FILE, "w") as f:
-                json.dump(self._current_layout, f, indent=2)
-            log.info("Layout saved to %s (%d panes)", LAYOUT_FILE, len(self._current_layout))
+                json.dump(self._screens_doc, f, indent=2)
+            log.info(
+                "Screens saved to %s (%d screens, playing=%d)",
+                LAYOUT_FILE,
+                len(self._screens_doc.get("screens", [])),
+                self._screens_doc.get("playingIndex", 0),
+            )
         except Exception as e:
-            log.warning("Failed to save layout: %s", e)
+            log.warning("Failed to save screens: %s", e)
+
+    def set_screens_doc(self, doc: dict):
+        """Replace the in-memory screens document (autosave path). Does not touch live panes."""
+        if not isinstance(doc, dict):
+            raise ValueError("screens doc must be an object")
+        screens = doc.get("screens")
+        if not isinstance(screens, list) or not screens:
+            raise ValueError("screens must be a non-empty array")
+        normalized = []
+        for i, scr in enumerate(screens):
+            if not isinstance(scr, dict):
+                raise ValueError(f"screen[{i}] must be an object")
+            panes = scr.get("panes", [])
+            if not isinstance(panes, list):
+                raise ValueError(f"screen[{i}].panes must be an array")
+            normalized.append({"name": str(scr.get("name") or f"Screen {i+1}"), "panes": panes})
+        playing = doc.get("playingIndex", 0)
+        if not isinstance(playing, int) or playing < 0 or playing >= len(normalized):
+            playing = 0
+        with self.lock:
+            self._screens_doc = {"screens": normalized, "playingIndex": playing}
+            try:
+                with open(LAYOUT_FILE, "w") as f:
+                    json.dump(self._screens_doc, f, indent=2)
+            except Exception as e:
+                log.warning("Failed to save screens: %s", e)
+
+    def play_screen(self, index: int):
+        """Set playingIndex and push that screen's panes to the live display."""
+        with self.lock:
+            screens = self._screens_doc.get("screens") or []
+            if index < 0 or index >= len(screens):
+                raise ValueError(f"playingIndex {index} out of range")
+            self._screens_doc["playingIndex"] = index
+            panes = list(screens[index].get("panes") or [])
+        self.apply_layout(panes)
 
     def load_saved_layout(self):
-        """Load and apply the previously saved layout, if any."""
+        """Load the saved screens doc; auto-migrate from legacy flat-list format."""
         if not os.path.exists(LAYOUT_FILE):
             log.info("No saved layout found at %s", LAYOUT_FILE)
             return
         try:
             with open(LAYOUT_FILE) as f:
-                layout = json.load(f)
-            if layout:
-                log.info("Restoring saved layout (%d panes)", len(layout))
-                self.apply_layout(layout)
+                data = json.load(f)
         except Exception as e:
-            log.warning("Failed to load saved layout: %s", e)
+            log.warning("Failed to read %s: %s", LAYOUT_FILE, e)
+            return
+
+        if isinstance(data, list):
+            log.info("Migrating legacy layout.json (%d panes) into screens format", len(data))
+            self._screens_doc = {
+                "screens": [{"name": "Default", "panes": data}],
+                "playingIndex": 0,
+            }
+            try:
+                with open(LAYOUT_FILE, "w") as f:
+                    json.dump(self._screens_doc, f, indent=2)
+            except Exception as e:
+                log.warning("Failed to rewrite migrated layout: %s", e)
+        elif isinstance(data, dict) and isinstance(data.get("screens"), list) and data["screens"]:
+            self._screens_doc = {
+                "screens": [
+                    {"name": str(s.get("name") or f"Screen {i+1}"), "panes": list(s.get("panes") or [])}
+                    for i, s in enumerate(data["screens"])
+                ],
+                "playingIndex": int(data.get("playingIndex", 0) or 0),
+            }
+            if self._screens_doc["playingIndex"] >= len(self._screens_doc["screens"]):
+                self._screens_doc["playingIndex"] = 0
+        else:
+            log.warning("Unrecognized layout.json shape; starting fresh")
+            return
+
+        idx = self._screens_doc["playingIndex"]
+        panes = list(self._screens_doc["screens"][idx].get("panes") or [])
+        if panes:
+            log.info("Restoring screen '%s' (%d panes)",
+                     self._screens_doc["screens"][idx]["name"], len(panes))
+            self.apply_layout(panes)
 
     # -- launchers ----------------------------------------------------------
 
@@ -935,12 +1024,15 @@ class Handler(BaseHTTPRequestHandler):
     """
     Endpoints
     ---------
-    POST /layout        — set the full layout (kills existing panes)
-    POST /pane          — add/replace a single pane
+    POST /layout         — set the full layout (kills existing panes)
+    POST /pane           — add/replace a single pane
     DELETE /pane/<name>  — remove a pane
-    POST /clear         — kill everything
-    GET  /status        — current state
-    GET  /health        — simple health check
+    POST /clear          — kill everything
+    GET  /screens        — return the saved screens document
+    POST /screens        — replace the saved screens document (autosave)
+    POST /screens/play   — play a screen by {index}
+    GET  /status         — current state
+    GET  /health         — simple health check
     """
 
     def _send_json(self, data: dict, code: int = 200):
@@ -973,13 +1065,15 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_stats()
         elif self.path == "/status":
             self._send_json(dm.status())
+        elif self.path == "/screens":
+            self._send_json(dm._screens_doc)
         elif self.path == "/health":
             self._send_json({"ok": True})
         else:
             self._send_json({"error": "Not found"}, 404)
 
     def _serve_index(self):
-        layout_json = json.dumps(dm._current_layout, indent=2)
+        screens_doc_json = json.dumps(dm._screens_doc, indent=2)
         status_data = dm.status()
         screen = status_data["screen"]
         status_json = json.dumps(status_data)
@@ -996,7 +1090,40 @@ h1{{font-size:1.3rem;margin:0 0 16px;color:#58a6ff}}
 .top{{display:flex;gap:16px;align-items:flex-start}}
 @media(max-width:900px){{.top{{flex-direction:column}}}}
 .preview-wrap{{flex:1;min-width:0}}
-.sidebar{{width:280px;flex-shrink:0}}
+.sidebar{{width:560px;flex-shrink:0}}
+@media(max-width:900px){{.sidebar{{width:100%}}}}
+.card-header{{display:flex;align-items:center;justify-content:space-between;margin:0 0 10px}}
+.card-header h2{{margin:0}}
+.icon-btn{{background:#30363d;color:#e6edf3;border:none;border-radius:6px;width:26px;height:26px;
+  font-size:18px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}}
+.icon-btn:hover{{background:#3d444d}}
+.screens-strip{{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px}}
+.screens-strip::-webkit-scrollbar{{height:8px}}
+.screens-strip::-webkit-scrollbar-thumb{{background:#30363d;border-radius:4px}}
+.screen-card{{position:relative;flex:0 0 auto;width:160px;cursor:pointer;user-select:none}}
+.screen-thumb{{position:relative;width:160px;height:96px;background:#010409;border:1px solid #30363d;
+  border-radius:6px;overflow:hidden}}
+.screen-card.editing .screen-thumb{{border-color:#f0883e}}
+.screen-card.playing .screen-thumb{{box-shadow:0 0 0 2px #238636 inset}}
+.screen-thumb .pane-mini{{position:absolute;border:1px solid #58a6ff;background:rgba(88,166,255,.15);
+  font-size:9px;color:#e6edf3;display:flex;align-items:center;justify-content:center;overflow:hidden;
+  text-shadow:0 1px 1px #000}}
+.screen-hover-actions{{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+  gap:10px;background:rgba(0,0,0,.45);border-radius:6px}}
+.screen-card:hover .screen-hover-actions{{display:flex}}
+.screen-name{{margin-top:6px;font-size:12px;color:#e6edf3;text-align:center;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.screen-card.editing .screen-name{{color:#f0883e;font-weight:600}}
+.btn-play{{background:#238636;color:#fff;border-radius:999px;padding:8px 16px;
+  font-weight:600;display:inline-flex;align-items:center;gap:6px}}
+.btn-play:hover{{background:#2ea043}}
+.btn-play.icon-only{{padding:0;width:36px;height:36px;justify-content:center;font-size:14px}}
+.btn-edit{{background:#30363d;color:#e6edf3;border-radius:999px;padding:0;width:36px;height:36px;
+  display:inline-flex;align-items:center;justify-content:center;font-size:14px}}
+.btn-edit:hover{{background:#3d444d}}
+.playing-badge{{position:absolute;top:4px;left:4px;background:#238636;color:#fff;
+  font-size:9px;font-weight:700;padding:1px 5px;border-radius:8px;letter-spacing:.3px;
+  text-transform:uppercase}}
 .card{{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;margin-bottom:16px}}
 .card h2{{font-size:.85rem;margin:0 0 10px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}}
 #preview{{position:relative;background:#010409;border:1px solid #30363d;border-radius:6px;overflow:hidden;cursor:default}}
@@ -1058,9 +1185,10 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
     <p class="info-line" id="screen-info"></p>
     <div id="preview"></div>
     <div class="actions">
-      <button class="btn-primary" onclick="applyLayout()">Apply Layout</button>
+      <button class="btn-play" onclick="applyLayout()" title="Apply this screen to the display">&#9654; Apply Layout</button>
       <button class="btn-danger" onclick="clearAll()">Clear All</button>
       <button class="btn-secondary" onclick="addPane()">+ Add Pane</button>
+      <button class="btn-danger" id="btn-delete-screen" onclick="deleteCurrentScreen()" title="Delete the screen currently being edited">Delete Screen</button>
     </div>
     <div id="result"></div>
     <details><summary>Raw JSON</summary>
@@ -1080,6 +1208,13 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
   </div>
 </div>
 <div class="sidebar">
+  <div class="card">
+    <div class="card-header">
+      <h2>Screens</h2>
+      <button class="icon-btn" title="New screen" onclick="newScreen()">+</button>
+    </div>
+    <div id="screens-strip" class="screens-strip"></div>
+  </div>
   <div class="card">
     <h2>Panes</h2>
     <div id="pane-list"></div>
@@ -1138,10 +1273,25 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
 <script>
 const SCREEN_W = {screen["width"]};
 const SCREEN_H = {screen["height"]};
-let layout = {layout_json};
+let screensDoc = {screens_doc_json};
+let editingIdx = screensDoc.playingIndex || 0;
+let layout = screensDoc.screens[editingIdx].panes;
 let statusData = {status_json};
 let selectedIdx = -1;
 let dragState = null;
+let persistTimer = null;
+
+function persistScreens() {{
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {{
+    persistTimer = null;
+    fetch("/screens", {{
+      method: "POST",
+      headers: {{"Content-Type": "application/json"}},
+      body: JSON.stringify(screensDoc),
+    }}).catch(() => {{}});
+  }}, 250);
+}}
 
 const preview = document.getElementById("preview");
 
@@ -1183,7 +1333,129 @@ function render() {{
     preview.appendChild(el);
   }});
   renderList();
+  renderScreens();
   syncJson();
+  persistScreens();
+}}
+
+function renderScreens() {{
+  const strip = document.getElementById("screens-strip");
+  strip.innerHTML = "";
+  const playingIdx = screensDoc.playingIndex || 0;
+  screensDoc.screens.forEach((scr, i) => {{
+    const card = document.createElement("div");
+    card.className = "screen-card" + (i === editingIdx ? " editing" : "") + (i === playingIdx ? " playing" : "");
+    const thumb = document.createElement("div");
+    thumb.className = "screen-thumb";
+    // Render mini panes inside thumb (160×96)
+    const TW = 160, TH = 96;
+    (scr.panes || []).forEach(p => {{
+      const m = document.createElement("div");
+      m.className = "pane-mini";
+      const x = (p.x || 0), y = (p.y || 0), w = (p.w || 1), h = (p.h || 1);
+      m.style.left = (x * TW) + "px";
+      m.style.top = (y * TH) + "px";
+      m.style.width = (w * TW) + "px";
+      m.style.height = (h * TH) + "px";
+      const ord = (p.order != null && p.order !== "") ? Number(p.order) : 0;
+      m.style.zIndex = String(ord * 1000 + 1);
+      m.textContent = p.name || p.type || "";
+      thumb.appendChild(m);
+    }});
+    if (i === playingIdx) {{
+      const b = document.createElement("div");
+      b.className = "playing-badge";
+      b.textContent = "Playing";
+      thumb.appendChild(b);
+    }}
+    const hover = document.createElement("div");
+    hover.className = "screen-hover-actions";
+    const playBtn = document.createElement("button");
+    playBtn.className = "btn-play icon-only";
+    playBtn.title = "Play this screen";
+    playBtn.innerHTML = "&#9654;";
+    playBtn.onclick = (e) => {{ e.stopPropagation(); playScreen(i); }};
+    const editBtn = document.createElement("button");
+    editBtn.className = "btn-edit";
+    editBtn.title = "Edit this screen";
+    editBtn.innerHTML = "&#9998;";
+    editBtn.onclick = (e) => {{ e.stopPropagation(); selectScreenForEdit(i); }};
+    hover.appendChild(playBtn);
+    hover.appendChild(editBtn);
+    thumb.appendChild(hover);
+    card.appendChild(thumb);
+    const nameEl = document.createElement("div");
+    nameEl.className = "screen-name";
+    nameEl.textContent = scr.name || ("Screen " + (i + 1));
+    nameEl.title = "Click to rename";
+    nameEl.onclick = (e) => {{ e.stopPropagation(); renameScreen(i); }};
+    card.appendChild(nameEl);
+    card.onclick = () => selectScreenForEdit(i);
+    strip.appendChild(card);
+  }});
+  const delBtn = document.getElementById("btn-delete-screen");
+  if (delBtn) delBtn.disabled = (screensDoc.screens.length <= 1);
+}}
+
+function selectScreenForEdit(i) {{
+  if (i < 0 || i >= screensDoc.screens.length) return;
+  editingIdx = i;
+  layout = screensDoc.screens[i].panes;
+  selectedIdx = -1;
+  render();
+}}
+
+function newScreen() {{
+  const n = screensDoc.screens.length + 1;
+  screensDoc.screens.push({{ name: "Screen " + n, panes: [] }});
+  editingIdx = screensDoc.screens.length - 1;
+  layout = screensDoc.screens[editingIdx].panes;
+  selectedIdx = -1;
+  render();
+}}
+
+function renameScreen(i) {{
+  const cur = screensDoc.screens[i];
+  const v = prompt("Screen name:", cur.name || "");
+  if (v == null) return;
+  const trimmed = v.trim();
+  if (!trimmed) return;
+  cur.name = trimmed;
+  render();
+}}
+
+function deleteCurrentScreen() {{
+  if (screensDoc.screens.length <= 1) return;
+  const cur = screensDoc.screens[editingIdx];
+  if (!confirm("Delete screen '" + (cur.name || "?") + "'? This cannot be undone.")) return;
+  screensDoc.screens.splice(editingIdx, 1);
+  if (screensDoc.playingIndex >= screensDoc.screens.length) {{
+    screensDoc.playingIndex = screensDoc.screens.length - 1;
+  }} else if (screensDoc.playingIndex > editingIdx) {{
+    screensDoc.playingIndex -= 1;
+  }}
+  if (editingIdx >= screensDoc.screens.length) editingIdx = screensDoc.screens.length - 1;
+  layout = screensDoc.screens[editingIdx].panes;
+  selectedIdx = -1;
+  render();
+}}
+
+async function playScreen(i) {{
+  try {{
+    const res = await fetch("/screens/play", {{
+      method: "POST",
+      headers: {{"Content-Type": "application/json"}},
+      body: JSON.stringify({{ index: i }}),
+    }});
+    const data = await res.json();
+    if (res.ok) {{
+      screensDoc.playingIndex = i;
+      statusData = data;
+      showResult(true, "Playing '" + (screensDoc.screens[i].name || "?") + "'");
+      renderScreens();
+      setTimeout(refreshStatus, 2000);
+    }} else showResult(false, data.error || "Error");
+  }} catch(e) {{ showResult(false, e.message); }}
 }}
 
 function renderList() {{
@@ -1385,7 +1657,10 @@ function syncJson() {{
 
 function loadFromJson() {{
   try {{
-    layout = JSON.parse(document.getElementById("raw-json").value);
+    const parsed = JSON.parse(document.getElementById("raw-json").value);
+    if (!Array.isArray(parsed)) throw new Error("Expected an array of panes");
+    layout.length = 0;
+    parsed.forEach(p => layout.push(p));
     selectedIdx = -1;
     render();
     showResult(true, "Loaded from JSON");
@@ -1400,16 +1675,25 @@ function showResult(ok, msg) {{
 }}
 
 async function applyLayout() {{
+  // Make sure the saved doc is up-to-date before asking server to play.
+  if (persistTimer) {{ clearTimeout(persistTimer); persistTimer = null; }}
   try {{
-    const res = await fetch("/layout", {{
+    await fetch("/screens", {{
       method: "POST",
       headers: {{"Content-Type": "application/json"}},
-      body: JSON.stringify(layout),
+      body: JSON.stringify(screensDoc),
+    }});
+    const res = await fetch("/screens/play", {{
+      method: "POST",
+      headers: {{"Content-Type": "application/json"}},
+      body: JSON.stringify({{ index: editingIdx }}),
     }});
     const data = await res.json();
     if (res.ok) {{
+      screensDoc.playingIndex = editingIdx;
       statusData = data;
       showResult(true, "Applied — " + Object.keys(data.panes || {{}}).length + " panes");
+      renderScreens();
       setTimeout(refreshStatus, 2000);
     }} else showResult(false, data.error || "Error");
   }} catch(e) {{ showResult(false, e.message); }}
@@ -1419,7 +1703,7 @@ async function clearAll() {{
   if (!confirm("Kill all panes?")) return;
   const res = await fetch("/clear", {{ method: "POST" }});
   if (res.ok) {{
-    layout = [];
+    layout.length = 0;
     selectedIdx = -1;
     render();
     showResult(true, "Cleared");
@@ -1674,6 +1958,17 @@ setInterval(refresh, 3000);
             elif self.path == "/clear":
                 dm.clear()
                 self._send_json({"ok": True})
+
+            elif self.path == "/screens":
+                doc = self._read_json()
+                dm.set_screens_doc(doc)
+                self._send_json({"ok": True})
+
+            elif self.path == "/screens/play":
+                body = self._read_json()
+                idx = int(body.get("index", 0)) if isinstance(body, dict) else 0
+                dm.play_screen(idx)
+                self._send_json(dm.status())
 
             else:
                 self._send_json({"error": "Not found"}, 404)
