@@ -1069,17 +1069,18 @@ class Handler(BaseHTTPRequestHandler):
     # --- GET ---------------------------------------------------------------
 
     def do_GET(self):
-        if self.path == "/":
+        path = self.path.split("?", 1)[0]
+        if path == "/":
             self._serve_index()
-        elif self.path == "/stats":
+        elif path == "/stats":
             self._serve_stats()
-        elif self.path == "/status":
+        elif path == "/status":
             self._send_json(dm.status())
-        elif self.path == "/screens":
+        elif path == "/screens":
             self._send_json(dm._screens_doc)
-        elif self.path == "/screenshot.jpg":
+        elif path == "/screenshot.jpg":
             self._serve_screenshot()
-        elif self.path == "/health":
+        elif path == "/health":
             self._send_json({"ok": True})
         else:
             self._send_json({"error": "Not found"}, 404)
