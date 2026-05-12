@@ -1191,8 +1191,20 @@ h1{{font-size:1.3rem;margin:0;color:#58a6ff;line-height:1.6}}
 .live-shot-status{{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
   padding:12px;text-align:center;color:#8b949e;font-size:12px;background:rgba(13,17,23,.6)}}
 .live-shot-status.show{{display:flex}}
-.now-playing{{color:#8b949e;font-size:12px;margin:0 0 10px}}
-.now-playing b{{color:#e6edf3;font-weight:600}}
+.now-playing-inline{{margin-left:10px;color:#8b949e;font-size:11px;
+  text-transform:none;letter-spacing:normal;font-weight:400}}
+.now-playing-inline b{{color:#e6edf3;font-weight:600}}
+.modal{{position:fixed;inset:0;background:rgba(1,4,9,.75);display:none;
+  align-items:center;justify-content:center;z-index:100;padding:20px}}
+.modal.open{{display:flex}}
+.modal-card{{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;
+  width:min(720px,100%);max-height:80vh;display:flex;flex-direction:column}}
+.modal-card textarea{{flex:1;min-height:300px;margin-top:10px;background:#0d1117;color:#e6edf3;
+  border:1px solid #30363d;border-radius:6px;padding:10px;font-family:"SF Mono",Consolas,monospace;
+  font-size:12px;resize:vertical;tab-size:2;width:100%}}
+#preview.creating{{cursor:crosshair}}
+.create-rect{{position:absolute;border:2px dashed #3fb950;background:rgba(63,185,80,.12);
+  pointer-events:none;border-radius:3px}}
 .playing-badge{{position:absolute;top:4px;left:4px;background:#238636;color:#fff;
   font-size:9px;font-weight:700;padding:1px 5px;border-radius:8px;letter-spacing:.3px;
   text-transform:uppercase}}
@@ -1258,10 +1270,9 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
   <div class="design-row">
     <div class="card live-view-card">
       <div class="card-header">
-        <h2>Live View</h2>
+        <h2>Live View <span class="now-playing-inline">Playing: <b id="now-playing">—</b></span></h2>
         <button class="btn-pill btn-neutral" onclick="refreshLiveView()" title="Reload screenshot">&#x21bb; Refresh</button>
       </div>
-      <p class="now-playing">Playing: <b id="now-playing">—</b></p>
       <div class="live-shot-wrap">
         <img id="live-shot" alt="Live screen" onload="onLiveShotLoad()" onerror="onLiveShotError()">
         <div id="live-shot-status" class="live-shot-status">Loading…</div>
@@ -1271,16 +1282,13 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
       <div class="card-header">
         <h2>Screen Design</h2>
         <div class="header-actions">
+          <button class="btn-pill btn-neutral" onclick="openJsonModal()" title="View / edit raw JSON">{{ }} JSON</button>
           <button class="btn-pill btn-play" onclick="applyLayout()" title="Apply this screen to the display">&#9654; Apply</button>
           <button class="btn-pill btn-danger" id="btn-delete-screen" onclick="deleteCurrentScreen()" title="Delete the screen currently being edited">Delete</button>
         </div>
       </div>
       <div id="preview"></div>
       <div id="result"></div>
-      <details><summary>Raw JSON</summary>
-        <textarea id="raw-json"></textarea>
-        <div class="actions"><button class="btn-secondary btn-sm" onclick="loadFromJson()">Load from JSON</button></div>
-      </details>
     </div>
   </div>
   <div class="card">
@@ -1351,6 +1359,18 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
     </div>
   </div>
 </div>
+</div>
+<div id="json-modal" class="modal" onclick="if(event.target===this)closeJsonModal()">
+  <div class="modal-card">
+    <div class="card-header">
+      <h2>Raw JSON</h2>
+      <div class="header-actions">
+        <button class="btn-pill btn-play" onclick="loadFromJson()">Load</button>
+        <button class="btn-pill btn-neutral" onclick="closeJsonModal()">Close</button>
+      </div>
+    </div>
+    <textarea id="raw-json" spellcheck="false"></textarea>
+  </div>
 </div>
 <script>
 const SCREEN_W = {screen["width"]};
@@ -1760,7 +1780,72 @@ function loadFromJson() {{
     selectedIdx = -1;
     render();
     showResult(true, "Loaded from JSON");
+    closeJsonModal();
   }} catch(e) {{ showResult(false, e.message); }}
+}}
+
+function openJsonModal() {{
+  syncJson();
+  document.getElementById("json-modal").classList.add("open");
+}}
+
+function closeJsonModal() {{
+  document.getElementById("json-modal").classList.remove("open");
+}}
+
+let createState = null;
+
+function onPreviewMouseDown(e) {{
+  if (e.target !== preview) return;
+  e.preventDefault();
+  const r = preview.getBoundingClientRect();
+  const sx = e.clientX - r.left, sy = e.clientY - r.top;
+  const rect = document.createElement("div");
+  rect.className = "create-rect";
+  rect.style.left = sx + "px"; rect.style.top = sy + "px";
+  rect.style.width = "0px"; rect.style.height = "0px";
+  preview.appendChild(rect);
+  preview.classList.add("creating");
+  createState = {{ sx, sy, rect, moved: false }};
+  document.addEventListener("mousemove", onCreateMove);
+  document.addEventListener("mouseup", onCreateEnd);
+}}
+
+function onCreateMove(e) {{
+  if (!createState) return;
+  const r = preview.getBoundingClientRect();
+  const cx = Math.max(0, Math.min(r.width, e.clientX - r.left));
+  const cy = Math.max(0, Math.min(r.height, e.clientY - r.top));
+  const w = Math.abs(cx - createState.sx), h = Math.abs(cy - createState.sy);
+  if (w > 4 || h > 4) createState.moved = true;
+  createState.rect.style.left = Math.min(createState.sx, cx) + "px";
+  createState.rect.style.top = Math.min(createState.sy, cy) + "px";
+  createState.rect.style.width = w + "px";
+  createState.rect.style.height = h + "px";
+}}
+
+function onCreateEnd(e) {{
+  document.removeEventListener("mousemove", onCreateMove);
+  document.removeEventListener("mouseup", onCreateEnd);
+  preview.classList.remove("creating");
+  const s = createState;
+  createState = null;
+  if (!s) return;
+  s.rect.remove();
+  if (!s.moved) return;
+  const scale = parseFloat(preview.dataset.scale);
+  const r = preview.getBoundingClientRect();
+  const cx = Math.max(0, Math.min(r.width, e.clientX - r.left));
+  const cy = Math.max(0, Math.min(r.height, e.clientY - r.top));
+  const px = Math.min(s.sx, cx), py = Math.min(s.sy, cy);
+  const pw = Math.abs(cx - s.sx), ph = Math.abs(cy - s.sy);
+  const x = round(px / (scale * SCREEN_W));
+  const y = round(py / (scale * SCREEN_H));
+  const w = round(pw / (scale * SCREEN_W));
+  const h = round(ph / (scale * SCREEN_H));
+  if (w < 0.02 || h < 0.02) return;
+  layout.push({{ name: "pane" + (layout.length + 1), type: "web", url: "https://example.com", x, y, w, h }});
+  select(layout.length - 1);
 }}
 
 function showResult(ok, msg) {{
@@ -1879,6 +1964,7 @@ function renderProcTable() {{
 }}
 
 window.addEventListener("resize", () => {{ initPreview(); render(); }});
+preview.addEventListener("mousedown", onPreviewMouseDown);
 initPreview();
 render();
 renderProcTable();
