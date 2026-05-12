@@ -1086,7 +1086,15 @@ class Handler(BaseHTTPRequestHandler):
 <style>
 *,*::before,*::after{{box-sizing:border-box}}
 body{{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:20px;background:#0d1117;color:#e6edf3}}
-h1{{font-size:1.3rem;margin:0 0 16px;color:#58a6ff}}
+h1{{font-size:1.3rem;margin:0;color:#58a6ff;line-height:1.6}}
+.titlebar{{display:flex;align-items:center;gap:16px;margin:0 0 16px}}
+.sys-bar{{margin-left:auto;display:flex;align-items:center;gap:14px;font-size:12px;color:#8b949e;
+  white-space:nowrap;flex-wrap:wrap;justify-content:flex-end}}
+.sys-bar .item{{display:inline-flex;align-items:baseline;gap:5px}}
+.sys-bar .item .lbl{{color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:.3px}}
+.sys-bar .item .val{{color:#e6edf3;font-weight:600;font-size:12px}}
+.sys-bar .item.warn .val{{color:#d29922}}
+.sys-bar .item.crit .val{{color:#f85149}}
 .top{{display:flex;gap:16px;align-items:flex-start}}
 @media(max-width:900px){{.top{{flex-direction:column}}}}
 .preview-wrap{{flex:1;min-width:0}}
@@ -1100,17 +1108,14 @@ h1{{font-size:1.3rem;margin:0 0 16px;color:#58a6ff}}
 .screens-strip{{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px}}
 .screens-strip::-webkit-scrollbar{{height:8px}}
 .screens-strip::-webkit-scrollbar-thumb{{background:#30363d;border-radius:4px}}
-.screen-card{{position:relative;flex:0 0 auto;width:160px;cursor:pointer;user-select:none}}
-.screen-thumb{{position:relative;width:160px;height:96px;background:#010409;border:1px solid #30363d;
+.screen-card{{position:relative;flex:0 0 auto;width:84px;cursor:pointer;user-select:none}}
+.screen-thumb{{position:relative;width:84px;height:112px;background:#010409;border:1px solid #30363d;
   border-radius:6px;overflow:hidden}}
 .screen-card.editing .screen-thumb{{border-color:#f0883e}}
 .screen-card.playing .screen-thumb{{box-shadow:0 0 0 2px #238636 inset}}
 .screen-thumb .pane-mini{{position:absolute;border:1px solid #58a6ff;background:rgba(88,166,255,.15);
-  font-size:9px;color:#e6edf3;display:flex;align-items:center;justify-content:center;overflow:hidden;
+  font-size:8px;color:#e6edf3;display:flex;align-items:center;justify-content:center;overflow:hidden;
   text-shadow:0 1px 1px #000}}
-.screen-hover-actions{{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
-  gap:10px;background:rgba(0,0,0,.45);border-radius:6px}}
-.screen-card:hover .screen-hover-actions{{display:flex}}
 .screen-name{{margin-top:6px;font-size:12px;color:#e6edf3;text-align:center;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .screen-card.editing .screen-name{{color:#f0883e;font-weight:600}}
@@ -1177,7 +1182,10 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
 .bar-ok{{background:#238636}}.bar-warn{{background:#d29922}}.bar-crit{{background:#da3633}}
 .sys-sub{{font-size:11px;color:#8b949e;margin-top:3px}}
 </style></head><body>
-<h1>Pi Display Server</h1>
+<div class="titlebar">
+  <h1>Pi Display Server</h1>
+  <div class="sys-bar" id="sys-stats"></div>
+</div>
 <div class="top">
 <div class="preview-wrap">
   <div class="card">
@@ -1186,8 +1194,6 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
     <div id="preview"></div>
     <div class="actions">
       <button class="btn-play" onclick="applyLayout()" title="Apply this screen to the display">&#9654; Apply Layout</button>
-      <button class="btn-danger" onclick="clearAll()">Clear All</button>
-      <button class="btn-secondary" onclick="addPane()">+ Add Pane</button>
       <button class="btn-danger" id="btn-delete-screen" onclick="deleteCurrentScreen()" title="Delete the screen currently being edited">Delete Screen</button>
     </div>
     <div id="result"></div>
@@ -1195,11 +1201,6 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
       <textarea id="raw-json"></textarea>
       <div class="actions"><button class="btn-secondary btn-sm" onclick="loadFromJson()">Load from JSON</button></div>
     </details>
-  </div>
-  <div class="card">
-    <h2>System</h2>
-    <div class="sys-grid" id="sys-stats"></div>
-    <p class="sys-sub" id="sys-extra"></p>
   </div>
   <div class="card">
     <h2>Running Panes</h2>
@@ -1347,8 +1348,8 @@ function renderScreens() {{
     card.className = "screen-card" + (i === editingIdx ? " editing" : "") + (i === playingIdx ? " playing" : "");
     const thumb = document.createElement("div");
     thumb.className = "screen-thumb";
-    // Render mini panes inside thumb (160×96)
-    const TW = 160, TH = 96;
+    // Render mini panes inside thumb (84×112 portrait)
+    const TW = 84, TH = 112;
     (scr.panes || []).forEach(p => {{
       const m = document.createElement("div");
       m.className = "pane-mini";
@@ -1368,21 +1369,6 @@ function renderScreens() {{
       b.textContent = "Playing";
       thumb.appendChild(b);
     }}
-    const hover = document.createElement("div");
-    hover.className = "screen-hover-actions";
-    const playBtn = document.createElement("button");
-    playBtn.className = "btn-play icon-only";
-    playBtn.title = "Play this screen";
-    playBtn.innerHTML = "&#9654;";
-    playBtn.onclick = (e) => {{ e.stopPropagation(); playScreen(i); }};
-    const editBtn = document.createElement("button");
-    editBtn.className = "btn-edit";
-    editBtn.title = "Edit this screen";
-    editBtn.innerHTML = "&#9998;";
-    editBtn.onclick = (e) => {{ e.stopPropagation(); selectScreenForEdit(i); }};
-    hover.appendChild(playBtn);
-    hover.appendChild(editBtn);
-    thumb.appendChild(hover);
     card.appendChild(thumb);
     const nameEl = document.createElement("div");
     nameEl.className = "screen-name";
@@ -1735,8 +1721,7 @@ function fmtUptime(sec) {{
 
 function renderSystemStats() {{
   const s = statusData.system || {{}};
-  const grid = document.getElementById("sys-stats");
-  const extra = document.getElementById("sys-extra");
+  const bar = document.getElementById("sys-stats");
 
   let cpuPct = null;
   if (s.cpu_total_ticks != null && prevCpuTotal != null) {{
@@ -1747,50 +1732,21 @@ function renderSystemStats() {{
   prevCpuIdle = s.cpu_idle_ticks;
   prevCpuTotal = s.cpu_total_ticks;
 
-  let memPct = null;
-  if (s.mem_total_mb) memPct = Math.round(s.mem_used_mb / s.mem_total_mb * 100);
+  const memPct = s.mem_total_mb ? Math.round(s.mem_used_mb / s.mem_total_mb * 100) : null;
+  const diskPct = s.disk_total_gb ? Math.round(s.disk_used_gb / s.disk_total_gb * 100) : null;
+  const tempPct = s.cpu_temp_c != null ? Math.min(100, Math.round((s.cpu_temp_c / 85) * 100)) : null;
 
-  let diskPct = null;
-  if (s.disk_total_gb) diskPct = Math.round(s.disk_used_gb / s.disk_total_gb * 100);
+  const items = [
+    {{ lbl: "CPU",  val: cpuPct  != null ? cpuPct  + "%" : "\\u2014", pct: cpuPct  }},
+    {{ lbl: "Mem",  val: memPct  != null ? memPct  + "%" : "\\u2014", pct: memPct  }},
+    {{ lbl: "Temp", val: s.cpu_temp_c != null ? s.cpu_temp_c + "\\u00b0C" : "\\u2014", pct: tempPct }},
+    {{ lbl: "Disk", val: diskPct != null ? diskPct + "%" : "\\u2014", pct: diskPct }},
+  ];
 
-  const items = [];
-  items.push({{
-    lbl: "CPU",
-    val: cpuPct != null ? cpuPct + "%" : "\\u2014",
-    pct: cpuPct,
-    sub: s.cpu_count ? s.cpu_count + " cores" : ""
-  }});
-  items.push({{
-    lbl: "Memory",
-    val: s.mem_used_mb != null ? s.mem_used_mb + " / " + s.mem_total_mb + " MB" : "\\u2014",
-    pct: memPct,
-    sub: ""
-  }});
-  items.push({{
-    lbl: "Temperature",
-    val: s.cpu_temp_c != null ? s.cpu_temp_c + " \\u00b0C" : "\\u2014",
-    pct: s.cpu_temp_c != null ? Math.min(100, Math.round((s.cpu_temp_c / 85) * 100)) : null,
-    sub: ""
-  }});
-  items.push({{
-    lbl: "Disk",
-    val: s.disk_used_gb != null ? s.disk_used_gb + " / " + s.disk_total_gb + " GB" : "\\u2014",
-    pct: diskPct,
-    sub: ""
-  }});
-
-  grid.innerHTML = items.map(it => {{
-    const bar = it.pct != null
-      ? '<div class="bar-wrap"><div class="bar-fill ' + barClass(it.pct) + '" style="width:' + it.pct + '%"></div></div>'
-      : '';
-    return '<div class="sys-stat"><div class="val">' + it.val + '</div><div class="lbl">' + it.lbl + '</div>' + bar +
-      (it.sub ? '<div class="sys-sub">' + it.sub + '</div>' : '') + '</div>';
+  bar.innerHTML = items.map(it => {{
+    const cls = it.pct == null ? "" : (it.pct > 85 ? " crit" : it.pct > 65 ? " warn" : "");
+    return '<span class="item' + cls + '"><span class="lbl">' + it.lbl + '</span><span class="val">' + it.val + '</span></span>';
   }}).join("");
-
-  const parts = [];
-  if (s.load_1 != null) parts.push("Load: " + s.load_1 + " / " + s.load_5 + " / " + s.load_15);
-  if (s.uptime_sec != null) parts.push("Uptime: " + fmtUptime(s.uptime_sec));
-  extra.textContent = parts.join("  \\u00b7  ");
 }}
 
 function renderProcTable() {{
