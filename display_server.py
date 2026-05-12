@@ -1085,26 +1085,46 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "Not found"}, 404)
 
     def _serve_screenshot(self):
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".jpg", prefix="pi-shot-")
+        os.close(fd)
         try:
-            result = subprocess.run(
-                ["scrot", "--quality", "80", "-o", "-"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=5,
-                check=False,
-            )
-        except FileNotFoundError:
-            self._send_json({"error": "scrot not installed"}, 503)
-            return
-        except subprocess.TimeoutExpired:
-            self._send_json({"error": "scrot timed out"}, 503)
-            return
-        if result.returncode != 0 or not result.stdout:
-            msg = result.stderr.decode(errors="replace").strip() or "scrot failed"
-            self._send_json({"error": msg}, 503)
-            return
-        self._send_bytes(result.stdout, "image/jpeg",
-                         headers={"Cache-Control": "no-store"})
+            try:
+                result = subprocess.run(
+                    ["scrot", "--overwrite", "--quality", "80", path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=5,
+                    check=False,
+                )
+            except FileNotFoundError:
+                self._send_json({"error": "scrot not installed"}, 503)
+                return
+            except subprocess.TimeoutExpired:
+                self._send_json({"error": "scrot timed out"}, 503)
+                return
+            if result.returncode != 0:
+                msg = result.stderr.decode(errors="replace").strip() or "scrot failed"
+                log.warning("scrot failed (rc=%d): %s", result.returncode, msg)
+                self._send_json({"error": msg}, 503)
+                return
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+            except OSError as e:
+                log.warning("Failed to read screenshot file: %s", e)
+                self._send_json({"error": str(e)}, 503)
+                return
+            if not data:
+                self._send_json({"error": "scrot produced empty file"}, 503)
+                return
+            self._send_bytes(data, "image/jpeg",
+                             headers={"Cache-Control": "no-store"})
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
     def _serve_index(self):
         screens_doc_json = json.dumps(dm._screens_doc, indent=2)
