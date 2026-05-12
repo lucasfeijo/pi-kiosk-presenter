@@ -1031,6 +1031,7 @@ class Handler(BaseHTTPRequestHandler):
     GET  /screens        — return the saved screens document
     POST /screens        — replace the saved screens document (autosave)
     POST /screens/play   — play a screen by {index}
+    GET  /screenshot.jpg — JPEG screenshot of the live X display
     GET  /status         — current state
     GET  /health         — simple health check
     """
@@ -1051,6 +1052,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_bytes(self, data: bytes, content_type: str, code: int = 200, headers: Optional[dict] = None):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(data)
+
     def _read_json(self) -> dict | list:
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length)
@@ -1067,10 +1077,34 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(dm.status())
         elif self.path == "/screens":
             self._send_json(dm._screens_doc)
+        elif self.path == "/screenshot.jpg":
+            self._serve_screenshot()
         elif self.path == "/health":
             self._send_json({"ok": True})
         else:
             self._send_json({"error": "Not found"}, 404)
+
+    def _serve_screenshot(self):
+        try:
+            result = subprocess.run(
+                ["scrot", "--quality", "80", "-o", "-"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                check=False,
+            )
+        except FileNotFoundError:
+            self._send_json({"error": "scrot not installed"}, 503)
+            return
+        except subprocess.TimeoutExpired:
+            self._send_json({"error": "scrot timed out"}, 503)
+            return
+        if result.returncode != 0 or not result.stdout:
+            msg = result.stderr.decode(errors="replace").strip() or "scrot failed"
+            self._send_json({"error": msg}, 503)
+            return
+        self._send_bytes(result.stdout, "image/jpeg",
+                         headers={"Cache-Control": "no-store"})
 
     def _serve_index(self):
         screens_doc_json = json.dumps(dm._screens_doc, indent=2)
@@ -1119,13 +1153,25 @@ h1{{font-size:1.3rem;margin:0;color:#58a6ff;line-height:1.6}}
 .screen-name{{margin-top:6px;font-size:12px;color:#e6edf3;text-align:center;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .screen-card.editing .screen-name{{color:#f0883e;font-weight:600}}
-.btn-play{{background:#238636;color:#fff;border-radius:999px;padding:8px 16px;
-  font-weight:600;display:inline-flex;align-items:center;gap:6px}}
-.btn-play:hover{{background:#2ea043}}
-.btn-play.icon-only{{padding:0;width:36px;height:36px;justify-content:center;font-size:14px}}
-.btn-edit{{background:#30363d;color:#e6edf3;border-radius:999px;padding:0;width:36px;height:36px;
-  display:inline-flex;align-items:center;justify-content:center;font-size:14px}}
-.btn-edit:hover{{background:#3d444d}}
+.btn-pill{{padding:6px 14px;border-radius:999px;font-weight:600;font-size:12px;
+  display:inline-flex;align-items:center;gap:6px;border:none;cursor:pointer;color:#fff;line-height:1}}
+.btn-pill.btn-play{{background:#238636}} .btn-pill.btn-play:hover{{background:#2ea043}}
+.btn-pill.btn-danger{{background:#da3633}} .btn-pill.btn-danger:hover{{background:#e5534b}}
+.btn-pill.btn-neutral{{background:#30363d;color:#e6edf3}} .btn-pill.btn-neutral:hover{{background:#3d444d}}
+.btn-pill[disabled]{{opacity:.45;cursor:not-allowed}}
+.header-actions{{display:flex;gap:8px}}
+.design-row{{display:flex;gap:16px;align-items:flex-start}}
+@media(max-width:700px){{.design-row{{flex-direction:column}}}}
+.live-view-card{{flex:0 0 auto;width:280px}}
+.design-card{{flex:1;min-width:0}}
+.live-shot-wrap{{position:relative;background:#010409;border:1px solid #30363d;border-radius:6px;
+  overflow:hidden;min-height:120px;display:flex;align-items:center;justify-content:center}}
+#live-shot{{display:block;width:100%;height:auto}}
+.live-shot-status{{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+  padding:12px;text-align:center;color:#8b949e;font-size:12px;background:rgba(13,17,23,.6)}}
+.live-shot-status.show{{display:flex}}
+.now-playing{{color:#8b949e;font-size:12px;margin:0 0 10px}}
+.now-playing b{{color:#e6edf3;font-weight:600}}
 .playing-badge{{position:absolute;top:4px;left:4px;background:#238636;color:#fff;
   font-size:9px;font-weight:700;padding:1px 5px;border-radius:8px;letter-spacing:.3px;
   text-transform:uppercase}}
@@ -1188,19 +1234,33 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
 </div>
 <div class="top">
 <div class="preview-wrap">
-  <div class="card">
-    <h2>Screen Preview</h2>
-    <p class="info-line" id="screen-info"></p>
-    <div id="preview"></div>
-    <div class="actions">
-      <button class="btn-play" onclick="applyLayout()" title="Apply this screen to the display">&#9654; Apply Layout</button>
-      <button class="btn-danger" id="btn-delete-screen" onclick="deleteCurrentScreen()" title="Delete the screen currently being edited">Delete Screen</button>
+  <div class="design-row">
+    <div class="card live-view-card">
+      <div class="card-header">
+        <h2>Live View</h2>
+        <button class="btn-pill btn-neutral" onclick="refreshLiveView()" title="Reload screenshot">&#x21bb; Refresh</button>
+      </div>
+      <p class="now-playing">Playing: <b id="now-playing">—</b></p>
+      <div class="live-shot-wrap">
+        <img id="live-shot" alt="Live screen" onload="onLiveShotLoad()" onerror="onLiveShotError()">
+        <div id="live-shot-status" class="live-shot-status">Loading…</div>
+      </div>
     </div>
-    <div id="result"></div>
-    <details><summary>Raw JSON</summary>
-      <textarea id="raw-json"></textarea>
-      <div class="actions"><button class="btn-secondary btn-sm" onclick="loadFromJson()">Load from JSON</button></div>
-    </details>
+    <div class="card design-card">
+      <div class="card-header">
+        <h2>Screen Design</h2>
+        <div class="header-actions">
+          <button class="btn-pill btn-play" onclick="applyLayout()" title="Apply this screen to the display">&#9654; Apply</button>
+          <button class="btn-pill btn-danger" id="btn-delete-screen" onclick="deleteCurrentScreen()" title="Delete the screen currently being edited">Delete</button>
+        </div>
+      </div>
+      <div id="preview"></div>
+      <div id="result"></div>
+      <details><summary>Raw JSON</summary>
+        <textarea id="raw-json"></textarea>
+        <div class="actions"><button class="btn-secondary btn-sm" onclick="loadFromJson()">Load from JSON</button></div>
+      </details>
+    </div>
   </div>
   <div class="card">
     <h2>Running Panes</h2>
@@ -1305,8 +1365,24 @@ function initPreview() {{
   preview.style.width = Math.round(SCREEN_W * scale) + "px";
   preview.style.height = Math.round(SCREEN_H * scale) + "px";
   preview.dataset.scale = scale;
-  document.getElementById("screen-info").textContent =
-    "Screen: " + SCREEN_W + " \\u00d7 " + SCREEN_H + " px";
+}}
+
+function refreshLiveView() {{
+  const img = document.getElementById("live-shot");
+  const status = document.getElementById("live-shot-status");
+  status.textContent = "Loading…";
+  status.classList.add("show");
+  img.src = "/screenshot.jpg?t=" + Date.now();
+}}
+
+function onLiveShotLoad() {{
+  document.getElementById("live-shot-status").classList.remove("show");
+}}
+
+function onLiveShotError() {{
+  const status = document.getElementById("live-shot-status");
+  status.textContent = "Screenshot unavailable (is scrot installed?)";
+  status.classList.add("show");
 }}
 
 function render() {{
@@ -1343,6 +1419,8 @@ function renderScreens() {{
   const strip = document.getElementById("screens-strip");
   strip.innerHTML = "";
   const playingIdx = screensDoc.playingIndex || 0;
+  const np = document.getElementById("now-playing");
+  if (np) np.textContent = (screensDoc.screens[playingIdx] && screensDoc.screens[playingIdx].name) || "—";
   screensDoc.screens.forEach((scr, i) => {{
     const card = document.createElement("div");
     card.className = "screen-card" + (i === editingIdx ? " editing" : "") + (i === playingIdx ? " playing" : "");
@@ -1773,6 +1851,7 @@ initPreview();
 render();
 renderProcTable();
 refreshStatus();
+refreshLiveView();
 setInterval(refreshStatus, 5000);
 </script></body></html>"""
         self._send_html(html)

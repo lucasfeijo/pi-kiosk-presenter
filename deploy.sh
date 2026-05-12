@@ -41,6 +41,11 @@ ssh "${PI_HOST}" "set -e
       sudo apt-get update -qq
       sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq x11-utils
     fi
+    if ! command -v scrot >/dev/null 2>&1; then
+      echo 'Installing scrot…'
+      sudo apt-get update -qq
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq scrot
+    fi
     sudo rm -rf ${REMOTE_DIR}
     sudo git clone ${REPO_URL} ${REMOTE_DIR}
     sudo chmod +x ${REMOTE_DIR}/update.sh

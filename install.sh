@@ -27,6 +27,7 @@ sudo apt-get install -y -qq \
     mpv \
     chromium \
     feh \
+    scrot \
     python3
 
 # --- Clone repo ------------------------------------------------------------

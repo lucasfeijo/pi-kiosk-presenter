@@ -20,7 +20,7 @@ git clone https://github.com/YOU/pi-display-server.git /tmp/pi-display-server
 bash /tmp/pi-display-server/install.sh https://github.com/YOU/pi-display-server.git
 ```
 
-This clones the repo to `/opt/pi-display-server`, installs all dependencies (X11, openbox, xdotool, mpv, chromium, feh), sets up the systemd service on port **8686**, and creates default `~/.xinitrc` and `~/.bash_profile` for kiosk boot (only if they don't already exist).
+This clones the repo to `/opt/pi-display-server`, installs all dependencies (X11, openbox, xdotool, mpv, chromium, feh, scrot), sets up the systemd service on port **8686**, and creates default `~/.xinitrc` and `~/.bash_profile` for kiosk boot (only if they don't already exist).
 
 ## Prerequisites
 
