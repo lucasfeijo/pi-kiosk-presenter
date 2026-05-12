@@ -1153,7 +1153,7 @@ h1{{font-size:1.3rem;margin:0;color:#58a6ff;line-height:1.6}}
 .top{{display:flex;gap:16px;align-items:flex-start}}
 @media(max-width:900px){{.top{{flex-direction:column}}}}
 .preview-wrap{{flex:1;min-width:0}}
-.sidebar{{width:560px;flex-shrink:0}}
+.sidebar{{width:460px;flex-shrink:0}}
 @media(max-width:900px){{.sidebar{{width:100%}}}}
 .card-header{{display:flex;align-items:center;justify-content:space-between;margin:0 0 10px}}
 .card-header h2{{margin:0}}
@@ -1183,11 +1183,11 @@ h1{{font-size:1.3rem;margin:0;color:#58a6ff;line-height:1.6}}
 .header-actions{{display:flex;gap:8px}}
 .design-row{{display:flex;gap:16px;align-items:flex-start}}
 @media(max-width:700px){{.design-row{{flex-direction:column}}}}
-.live-view-card{{flex:0 0 auto;width:280px}}
+.live-view-card{{flex:0 0 auto}}
 .design-card{{flex:1;min-width:0}}
 .live-shot-wrap{{position:relative;background:#010409;border:1px solid #30363d;border-radius:6px;
-  overflow:hidden;min-height:120px;display:flex;align-items:center;justify-content:center}}
-#live-shot{{display:block;width:100%;height:auto}}
+  overflow:hidden;display:flex;align-items:center;justify-content:center}}
+#live-shot{{display:block;height:100%;width:auto;max-width:100%}}
 .live-shot-status{{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
   padding:12px;text-align:center;color:#8b949e;font-size:12px;background:rgba(13,17,23,.6)}}
 .live-shot-status.show{{display:flex}}
@@ -1378,14 +1378,25 @@ function persistScreens() {{
 const preview = document.getElementById("preview");
 
 function initPreview() {{
-  const maxW = preview.parentElement.clientWidth - 2;
+  const row = document.querySelector(".design-row");
+  const wrap = document.querySelector(".live-shot-wrap");
+  const gap = 16;
+  const rowW = row.clientWidth;
+  const aspect = SCREEN_W / SCREEN_H;
   const maxH = window.innerHeight - preview.getBoundingClientRect().top - 80;
-  const scaleW = maxW / SCREEN_W;
-  const scaleH = maxH / SCREEN_H;
-  const scale = Math.min(scaleW, scaleH > 0 ? scaleH : scaleW);
-  preview.style.width = Math.round(SCREEN_W * scale) + "px";
-  preview.style.height = Math.round(SCREEN_H * scale) + "px";
-  preview.dataset.scale = scale;
+  // Two equal-aspect boxes (preview + live view) must fit side-by-side in the row,
+  // so the shared height is bounded by the available width divided by 2*aspect,
+  // and by the viewport height.
+  const hByWidth = (rowW - gap) / (2 * aspect);
+  const h = Math.max(120, Math.min(maxH > 0 ? maxH : hByWidth, hByWidth));
+  const w = h * aspect;
+  preview.style.width = Math.round(w) + "px";
+  preview.style.height = Math.round(h) + "px";
+  preview.dataset.scale = h / SCREEN_H;
+  if (wrap) {{
+    wrap.style.width = Math.round(w) + "px";
+    wrap.style.height = Math.round(h) + "px";
+  }}
 }}
 
 function refreshLiveView() {{
