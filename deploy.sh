@@ -46,6 +46,11 @@ ssh "${PI_HOST}" "set -e
       sudo apt-get update -qq
       sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq scrot
     fi
+    if ! command -v conky >/dev/null 2>&1; then
+      echo 'Installing conky…'
+      sudo apt-get update -qq
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq conky-std fonts-dejavu
+    fi
     sudo rm -rf ${REMOTE_DIR}
     sudo git clone ${REPO_URL} ${REMOTE_DIR}
     sudo chmod +x ${REMOTE_DIR}/update.sh

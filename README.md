@@ -20,7 +20,7 @@ git clone https://github.com/YOU/pi-display-server.git /tmp/pi-display-server
 bash /tmp/pi-display-server/install.sh https://github.com/YOU/pi-display-server.git
 ```
 
-This clones the repo to `/opt/pi-display-server`, installs all dependencies (X11, openbox, xdotool, mpv, chromium, feh, scrot), sets up the systemd service on port **8686**, and creates default `~/.xinitrc` and `~/.bash_profile` for kiosk boot (only if they don't already exist).
+This clones the repo to `/opt/pi-display-server`, installs all dependencies (X11, openbox, xdotool, mpv, chromium, feh, scrot, conky), sets up the systemd service on port **8686**, and creates default `~/.xinitrc` and `~/.bash_profile` for kiosk boot (only if they don't already exist).
 
 ## Prerequisites
 
@@ -147,6 +147,7 @@ curl -X POST http://pi:8686/clear
 | `web` | `browser` | Opens a URL in Chromium kiosk mode | `url` |
 | `image` | — | Shows an image via `feh` | `path` |
 | `command` | — | Runs any command that creates an X window | `cmd` |
+| `clock` | — | Lightweight strftime clock via `conky` | — (optional: `format`, `color`, `font`, `font_size`) |
 
 ## Visual Layout Editor
 

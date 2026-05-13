@@ -547,6 +547,59 @@ class DisplayManager:
         stats_pane = {**pane, "type": "web", "url": url, "chromium_args": extra}
         return self._launch_web(stats_pane, geom)
 
+    def _launch_clock(self, pane: dict, geom: tuple[int, int, int, int]) -> subprocess.Popen:
+        """Lightweight clock pane backed by conky. ~5–15 MB RAM, 1 Hz updates."""
+        x, y, w, h = geom
+        name = pane.get("name", "clock")
+        fmt = pane.get("format", "%H:%M:%S")
+        color = pane.get("color", "white")
+        font = pane.get("font", "DejaVu Sans Bold")
+        # Default font size: ~45% of pane height in points (≈60% as pixels @ 96 DPI).
+        try:
+            size = int(pane.get("font_size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size <= 0:
+            size = max(8, int(h * 0.45))
+        # Vertical centering: voffset by half of leftover space (text ≈ size*1.333 px).
+        text_h_px = int(size * 1.333)
+        voff = max(0, (h - text_h_px) // 2)
+
+        cfg_path = f"/tmp/pi-display-clock-{name}.conkyrc"
+        config = (
+            "conky.config = {\n"
+            "  own_window = true,\n"
+            "  own_window_type = 'normal',\n"
+            "  own_window_hints = 'undecorated,sticky,skip_taskbar,skip_pager,below',\n"
+            f"  own_window_title = [[{name}]],\n"
+            "  own_window_argb_visual = true,\n"
+            "  own_window_argb_value = 0,\n"
+            "  background = false,\n"
+            "  double_buffer = true,\n"
+            "  use_xft = true,\n"
+            f"  font = [[{font}:size={size}]],\n"
+            "  update_interval = 1.0,\n"
+            f"  minimum_width = {w},\n"
+            f"  minimum_height = {h},\n"
+            f"  maximum_width = {w},\n"
+            "  alignment = 'top_left',\n"
+            f"  gap_x = {x},\n"
+            f"  gap_y = {y},\n"
+            f"  default_color = [[{color}]],\n"
+            "  text_buffer_size = 256,\n"
+            "  out_to_console = false,\n"
+            "};\n"
+            f"conky.text = [[${{voffset {voff}}}${{alignc}}${{time {fmt}}}]];\n"
+        )
+        try:
+            with open(cfg_path, "w") as f:
+                f.write(config)
+        except OSError as e:
+            log.warning("Failed to write conky config for '%s': %s", name, e)
+        cmd = ["conky", "-c", cfg_path]
+        log.info("Launching conky: %s (size=%dpt fmt=%r)", " ".join(cmd), size, fmt)
+        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     LAUNCHERS = {
         "rtsp": _launch_rtsp,
         "stream": _launch_rtsp,     # alias
@@ -555,6 +608,7 @@ class DisplayManager:
         "image": _launch_image,
         "command": _launch_command,
         "stats": _launch_stats,
+        "clock": _launch_clock,
     }
 
     # -- core operations ----------------------------------------------------
@@ -1326,9 +1380,11 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
     <select id="p-type" onchange="updateProp('type',this.value)">
       <option value="rtsp">rtsp</option><option value="web">web</option>
       <option value="image">image</option><option value="command">command</option>
-      <option value="stats">stats</option>
+      <option value="stats">stats</option><option value="clock">clock</option>
     </select>
+    <div id="url-row">
     <label>URL / Path</label><input id="p-url" oninput="updateUrlProp(this.value)">
+    </div>
     <label>Fit (rtsp only)</label>
     <select id="p-fit" onchange="updateProp('fit',this.value)">
       <option value="fill">fill</option><option value="cover">cover</option><option value="contain">contain</option>
@@ -1353,6 +1409,14 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
     <div id="autorefresh-extra" style="display:none">
     <label title="Reload every N minutes (0 = off). Web panes reset the timer on interaction; rtsp streams hard reload on schedule.">Auto-refresh (min)</label>
     <input id="p-autorefresh" type="number" step="1" min="0" onchange="updateAutoRefresh(this.value)">
+    </div>
+    <div id="clock-extra" style="display:none">
+    <label title="strftime-style format, e.g. %H:%M:%S or %a %d/%m %H:%M">Format</label>
+    <input id="p-format" oninput="updateProp('format',this.value)" placeholder="%H:%M:%S">
+    <label title="X color name or #rrggbb">Color</label>
+    <input id="p-color" oninput="updateProp('color',this.value)" placeholder="white">
+    <label title="Point size (blank = auto-size to pane height)">Font size (pt)</label>
+    <input id="p-font-size" type="number" step="1" min="6" onchange="updateClockSize(this.value)" placeholder="auto">
     </div>
     <label title="Higher value draws on top when panes overlap">Stack order</label>
     <input id="p-order" type="number" step="1" onchange="updateOrder(this.value)">
@@ -1632,6 +1696,8 @@ function showProps() {{
   document.getElementById("p-fit").value = p.fit || "fill";
   const isRtsp = (p.type === "rtsp" || p.type === "stream");
   const isWeb = (p.type === "web" || p.type === "browser");
+  const isClock = (p.type === "clock");
+  document.getElementById("url-row").style.display = isClock ? "none" : "block";
   const rtspEx = document.getElementById("rtsp-extra");
   rtspEx.style.display = isRtsp ? "block" : "none";
   document.getElementById("p-hwdec").value = p.hwdec || "";
@@ -1640,6 +1706,11 @@ function showProps() {{
   const arEx = document.getElementById("autorefresh-extra");
   arEx.style.display = (isWeb || isRtsp) ? "block" : "none";
   document.getElementById("p-autorefresh").value = p.auto_refresh || "";
+  const clkEx = document.getElementById("clock-extra");
+  clkEx.style.display = isClock ? "block" : "none";
+  document.getElementById("p-format").value = p.format || "";
+  document.getElementById("p-color").value = p.color || "";
+  document.getElementById("p-font-size").value = p.font_size || "";
   document.getElementById("p-x").value = round(p.x || 0);
   document.getElementById("p-y").value = round(p.y || 0);
   document.getElementById("p-w").value = round(p.w || 1);
@@ -1691,6 +1762,15 @@ function updateAutoRefresh(val) {{
   const n = parseFloat(val);
   if (!val || Number.isNaN(n) || n <= 0) delete p.auto_refresh;
   else p.auto_refresh = n;
+  syncJson();
+}}
+
+function updateClockSize(val) {{
+  if (selectedIdx < 0) return;
+  const p = layout[selectedIdx];
+  const n = parseInt(val, 10);
+  if (!val || Number.isNaN(n) || n <= 0) delete p.font_size;
+  else p.font_size = n;
   syncJson();
 }}
 

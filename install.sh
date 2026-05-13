@@ -28,6 +28,8 @@ sudo apt-get install -y -qq \
     chromium \
     feh \
     scrot \
+    conky-std \
+    fonts-dejavu \
     python3
 
 # --- Clone repo ------------------------------------------------------------

@@ -24,6 +24,12 @@ if ! command -v scrot >/dev/null 2>&1; then
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq scrot
 fi
 
+if ! command -v conky >/dev/null 2>&1; then
+    echo "Missing dependency detected (conky). Installing…"
+    sudo apt-get update -qq
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq conky-std fonts-dejavu
+fi
+
 if ! diff -q "${INSTALL_DIR}/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.service" >/dev/null 2>&1; then
     echo "Service file changed, updating…"
     sudo cp "${INSTALL_DIR}/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.service"
