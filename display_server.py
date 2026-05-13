@@ -561,8 +561,10 @@ class DisplayManager:
             size = 0
         if size <= 0:
             size = max(8, int(h * 0.45))
-        # Vertical centering: voffset by half of leftover space (text ≈ size*1.333 px).
-        text_h_px = int(size * 1.333)
+        # Vertical centering. The font's full line height (ascent + descent)
+        # is ~1.23 EM and 1 EM ≈ 1.333 px/pt at 96 DPI, so ~1.64 px per point.
+        # Margins are forced to 0 below so the only offset is voffset itself.
+        text_h_px = int(size * 1.64)
         voff = max(0, (h - text_h_px) // 2)
 
         cfg_path = f"/tmp/pi-display-clock-{name}.conkyrc"
@@ -577,6 +579,8 @@ class DisplayManager:
             "  background = false,\n"
             "  double_buffer = true,\n"
             "  use_xft = true,\n"
+            "  border_inner_margin = 0,\n"
+            "  border_outer_margin = 0,\n"
             f"  font = [[{font}:size={size}]],\n"
             "  update_interval = 1.0,\n"
             f"  minimum_width = {w},\n"
