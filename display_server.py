@@ -1368,7 +1368,10 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
   <div class="card">
     <div class="card-header">
       <h2>Screens</h2>
-      <button class="icon-btn" title="New screen" onclick="newScreen()">+</button>
+      <div class="header-actions">
+        <button class="icon-btn" title="Duplicate current screen" onclick="duplicateCurrentScreen()">&#x2398;</button>
+        <button class="icon-btn" title="New screen" onclick="newScreen()">+</button>
+      </div>
     </div>
     <div id="screens-strip" class="screens-strip"></div>
   </div>
@@ -1597,6 +1600,18 @@ function selectScreenForEdit(i) {{
 function newScreen() {{
   const n = screensDoc.screens.length + 1;
   screensDoc.screens.push({{ name: "Screen " + n, panes: [] }});
+  editingIdx = screensDoc.screens.length - 1;
+  layout = screensDoc.screens[editingIdx].panes;
+  selectedIdx = -1;
+  render();
+}}
+
+function duplicateCurrentScreen() {{
+  const cur = screensDoc.screens[editingIdx];
+  if (!cur) return;
+  const copy = JSON.parse(JSON.stringify(cur));
+  copy.name = (cur.name || "Screen") + " copy";
+  screensDoc.screens.push(copy);
   editingIdx = screensDoc.screens.length - 1;
   layout = screensDoc.screens[editingIdx].panes;
   selectedIdx = -1;
