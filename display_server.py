@@ -57,6 +57,18 @@ INPUT_DEVICE_PATTERN = os.environ.get(
     "INPUT_DEVICE_PATTERN", r"(touch|stylus|mouse|tablet)"
 )
 RTSP_CAROUSEL_TYPE = "rtsp_carousel"
+RTSP_STREAM_FIELDS = ("fit", "hwdec", "rtsp_transport", "audio", "mpv_args")
+STREAM_NAME_POSITIONS = (
+    "top-left",
+    "top",
+    "top-right",
+    "left",
+    "center",
+    "right",
+    "bottom-left",
+    "bottom",
+    "bottom-right",
+)
 
 
 def _optional_nonnegative_number(value, field_name: str):
@@ -71,6 +83,20 @@ def _optional_nonnegative_number(value, field_name: str):
         raise ValueError(f"{field_name} must be a non-negative number") from None
     if parsed < 0:
         raise ValueError(f"{field_name} must be a non-negative number")
+
+
+def _optional_positive_number(value, field_name: str):
+    """Validate an optional numeric field that must be greater than zero."""
+    if value in (None, ""):
+        return
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a positive number")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be a positive number") from None
+    if parsed <= 0:
+        raise ValueError(f"{field_name} must be a positive number")
 
 
 def validate_rtsp_carousel_pane(pane: dict):
@@ -110,11 +136,46 @@ def validate_rtsp_carousel_pane(pane: dict):
                 "snapshot_refresh_seconds belongs to the rtsp_carousel pane, "
                 "not individual streams"
             )
+        fit = stream.get("fit")
+        if fit is not None and fit not in ("fill", "cover", "contain"):
+            raise ValueError(
+                f"rtsp_carousel streams[{index}].fit must be fill, cover, or contain"
+            )
+        hwdec = stream.get("hwdec")
+        if hwdec is not None and not isinstance(hwdec, str):
+            raise ValueError(
+                f"rtsp_carousel streams[{index}].hwdec must be a string"
+            )
+        transport = stream.get("rtsp_transport")
+        if transport is not None and transport not in ("tcp", "udp"):
+            raise ValueError(
+                f"rtsp_carousel streams[{index}].rtsp_transport must be tcp or udp"
+            )
+        if "audio" in stream and not isinstance(stream["audio"], bool):
+            raise ValueError(
+                f"rtsp_carousel streams[{index}].audio must be a boolean"
+            )
+        if "mpv_args" in stream and (
+            not isinstance(stream["mpv_args"], list)
+            or not all(isinstance(arg, str) for arg in stream["mpv_args"])
+        ):
+            raise ValueError(
+                f"rtsp_carousel streams[{index}].mpv_args must be an array of strings"
+            )
 
     _optional_nonnegative_number(
         pane.get("snapshot_refresh_seconds"), "snapshot_refresh_seconds"
     )
     _optional_nonnegative_number(pane.get("cycle_seconds"), "cycle_seconds")
+    _optional_positive_number(
+        pane.get("stream_name_font_size"), "stream_name_font_size"
+    )
+    name_position = pane.get("stream_name_position")
+    if name_position is not None and name_position not in STREAM_NAME_POSITIONS:
+        raise ValueError(
+            "stream_name_position must be one of: "
+            + ", ".join(STREAM_NAME_POSITIONS)
+        )
     for key in ("show_controls", "show_stream_name"):
         if key in pane and not isinstance(pane[key], bool):
             raise ValueError(f"{key} must be a boolean")
@@ -1535,7 +1596,9 @@ label.inline input{{width:auto}}
 .stream-row-actions{{display:flex;gap:4px}}
 .stream-row-actions button{{padding:2px 7px;font-size:11px;background:#30363d;color:#e6edf3}}
 .stream-row-actions button.danger{{background:#da3633;color:#fff}}
-.stream-row input{{font-size:12px;padding:5px 7px}}
+.stream-row input,.stream-row select,.stream-row textarea{{font-size:12px;padding:5px 7px}}
+.stream-row textarea{{width:100%;min-height:54px;background:#0d1117;color:#e6edf3;
+  border:1px solid #30363d;border-radius:4px;font-family:"SF Mono",Consolas,monospace;resize:vertical}}
 .stream-row label{{font-size:11px;margin-top:6px}}
 .sys-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}
 @media(max-width:500px){{.sys-grid{{grid-template-columns:1fr}}}}
@@ -1612,10 +1675,12 @@ label.inline input{{width:auto}}
     <div id="url-row">
     <label>URL / Path</label><input id="p-url" oninput="updateUrlProp(this.value)">
     </div>
-    <label>Fit (rtsp / carousel)</label>
+    <div id="fit-row">
+    <label>Fit (rtsp)</label>
     <select id="p-fit" onchange="updateProp('fit',this.value)">
       <option value="fill">fill</option><option value="cover">cover</option><option value="contain">contain</option>
     </select>
+    </div>
     <div id="rtsp-extra" style="display:none">
     <label title="Pi: v4l2m2m-copy for H.264 subs; drm-copy for H.265 mains">hwdec</label>
     <select id="p-hwdec" onchange="updateHwdec(this.value)">
@@ -1642,7 +1707,15 @@ label.inline input{{width:auto}}
       <label title="Advance to the next stream every N seconds. Blank or 0 disables automatic cycling.">Auto-cycle (sec)</label>
       <input id="p-cycle-seconds" type="number" step="1" min="0" onchange="updateCarouselSeconds('cycle_seconds',this.value)">
       <label class="inline"><input type="checkbox" id="p-show-controls" onchange="updateCarouselBool('show_controls',this.checked)"> Show previous / next controls</label>
-      <label class="inline"><input type="checkbox" id="p-show-stream-name" onchange="updateCarouselBool('show_stream_name',this.checked)"> Show current camera name</label>
+      <label>Camera name location</label>
+      <select id="p-stream-name-position" onchange="updateCarouselOption('stream_name_position',this.value)">
+        <option value="">hidden</option>
+        <option value="top-left">top-left</option><option value="top">top</option><option value="top-right">top-right</option>
+        <option value="left">left</option><option value="center">center</option><option value="right">right</option>
+        <option value="bottom-left">bottom-left</option><option value="bottom">bottom</option><option value="bottom-right">bottom-right</option>
+      </select>
+      <label>Camera name font size (px)</label>
+      <input id="p-stream-name-font-size" type="number" step="1" min="1" placeholder="auto" onchange="updateCarouselPositiveNumber('stream_name_font_size',this.value)">
     </div>
     <div id="autorefresh-extra" style="display:none">
     <label title="Reload every N minutes (0 = off). Web panes reset the timer on interaction; rtsp streams hard reload on schedule.">Auto-refresh (min)</label>
@@ -1949,8 +2022,9 @@ function showProps() {{
   const isWeb = (p.type === "web" || p.type === "browser");
   const isClock = (p.type === "clock");
   document.getElementById("url-row").style.display = (isClock || isCarousel) ? "none" : "block";
+  document.getElementById("fit-row").style.display = isCarousel ? "none" : "block";
   const rtspEx = document.getElementById("rtsp-extra");
-  rtspEx.style.display = (isRtsp || isCarousel) ? "block" : "none";
+  rtspEx.style.display = isRtsp ? "block" : "none";
   document.getElementById("p-hwdec").value = p.hwdec || "";
   document.getElementById("p-rtsp-t").value = p.rtsp_transport || "";
   document.getElementById("p-audio").checked = !!p.audio;
@@ -1958,11 +2032,15 @@ function showProps() {{
   carouselEx.style.display = isCarousel ? "block" : "none";
   if (isCarousel) {{
     if (!Array.isArray(p.streams)) p.streams = [];
+    migrateCarouselStreamOptions(p);
+    if (!p.stream_name_position && p.show_stream_name) p.stream_name_position = "top";
+    delete p.show_stream_name;
     renderCarouselStreams(p);
     document.getElementById("p-snapshot-refresh").value = p.snapshot_refresh_seconds || "";
     document.getElementById("p-cycle-seconds").value = p.cycle_seconds || "";
     document.getElementById("p-show-controls").checked = !!p.show_controls;
-    document.getElementById("p-show-stream-name").checked = !!p.show_stream_name;
+    document.getElementById("p-stream-name-position").value = p.stream_name_position || "";
+    document.getElementById("p-stream-name-font-size").value = p.stream_name_font_size || "";
   }}
   const arEx = document.getElementById("autorefresh-extra");
   arEx.style.display = (isWeb || isRtsp) ? "block" : "none";
@@ -1995,7 +2073,23 @@ function updatePaneType(val) {{
     p.streams = [first];
     delete p.url;
   }}
+  if (val === "rtsp_carousel") migrateCarouselStreamOptions(p);
   render();
+}}
+
+const CAROUSEL_STREAM_OPTION_KEYS = ["fit", "hwdec", "rtsp_transport", "audio", "mpv_args"];
+
+function migrateCarouselStreamOptions(p) {{
+  if (!Array.isArray(p.streams)) return;
+  CAROUSEL_STREAM_OPTION_KEYS.forEach(key => {{
+    if (p[key] === undefined) return;
+    p.streams.forEach(stream => {{
+      if (stream[key] === undefined) {{
+        stream[key] = Array.isArray(p[key]) ? [...p[key]] : p[key];
+      }}
+    }});
+    delete p[key];
+  }});
 }}
 
 function renderCarouselStreams(p) {{
@@ -2036,6 +2130,44 @@ function renderCarouselStreams(p) {{
       label.appendChild(input);
       row.appendChild(label);
     }});
+
+    [
+      ["Fit", "fit", [["fill", "fill"], ["cover", "cover"], ["contain", "contain"]]],
+      ["hwdec", "hwdec", [["", "(server default)"], ["v4l2m2m-copy", "v4l2m2m-copy (H.264)"], ["drm-copy", "drm-copy (H.265 / HEVC)"], ["no", "no (software)"], ["auto", "auto"]]],
+      ["RTSP transport", "rtsp_transport", [["", "(default)"], ["tcp", "tcp"], ["udp", "udp (faster LAN)"]]],
+    ].forEach(spec => {{
+      const label = document.createElement("label");
+      label.textContent = spec[0];
+      const select = document.createElement("select");
+      spec[2].forEach(optionSpec => {{
+        const option = document.createElement("option");
+        option.value = optionSpec[0];
+        option.textContent = optionSpec[1];
+        select.appendChild(option);
+      }});
+      select.value = stream[spec[1]] || (spec[1] === "fit" ? "fill" : "");
+      select.onchange = () => updateCarouselStream(index, spec[1], select.value);
+      label.appendChild(select);
+      row.appendChild(label);
+    }});
+
+    const audioLabel = document.createElement("label");
+    audioLabel.className = "inline";
+    const audioInput = document.createElement("input");
+    audioInput.type = "checkbox";
+    audioInput.checked = !!stream.audio;
+    audioInput.onchange = () => updateCarouselStream(index, "audio", audioInput.checked);
+    audioLabel.appendChild(audioInput);
+    audioLabel.appendChild(document.createTextNode(" Decode audio"));
+    row.appendChild(audioLabel);
+
+    const argsLabel = document.createElement("label");
+    argsLabel.textContent = "MPV args (one argument per line)";
+    const argsInput = document.createElement("textarea");
+    argsInput.value = Array.isArray(stream.mpv_args) ? stream.mpv_args.join("\\n") : "";
+    argsInput.onchange = () => updateCarouselMpvArgs(index, argsInput.value);
+    argsLabel.appendChild(argsInput);
+    row.appendChild(argsLabel);
     container.appendChild(row);
   }});
 }}
@@ -2068,10 +2200,17 @@ function updateCarouselStream(index, key, value) {{
   if (selectedIdx < 0) return;
   const stream = (layout[selectedIdx].streams || [])[index];
   if (!stream) return;
-  if ((key === "url" || key === "snapshot_url") && !value) delete stream[key];
+  if ((key === "url" || key === "snapshot_url" || key === "hwdec" || key === "rtsp_transport") && !value) delete stream[key];
+  else if (key === "audio" && !value) delete stream[key];
+  else if (key === "mpv_args" && (!Array.isArray(value) || !value.length)) delete stream[key];
   else stream[key] = value;
   syncJson();
   persistScreens();
+}}
+
+function updateCarouselMpvArgs(index, value) {{
+  const args = value.split("\\n").map(arg => arg.trim()).filter(Boolean);
+  updateCarouselStream(index, "mpv_args", args);
 }}
 
 function updateCarouselSeconds(key, value) {{
@@ -2088,6 +2227,24 @@ function updateCarouselBool(key, checked) {{
   if (selectedIdx < 0) return;
   const p = layout[selectedIdx];
   if (checked) p[key] = true; else delete p[key];
+  syncJson();
+  persistScreens();
+}}
+
+function updateCarouselOption(key, value) {{
+  if (selectedIdx < 0) return;
+  const p = layout[selectedIdx];
+  if (value) p[key] = value; else delete p[key];
+  syncJson();
+  persistScreens();
+}}
+
+function updateCarouselPositiveNumber(key, value) {{
+  if (selectedIdx < 0) return;
+  const p = layout[selectedIdx];
+  const number = parseFloat(value);
+  if (!value || Number.isNaN(number) || number <= 0) delete p[key];
+  else p[key] = number;
   syncJson();
   persistScreens();
 }}

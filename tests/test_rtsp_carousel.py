@@ -18,8 +18,11 @@ from display_server import (
 )
 from rtsp_carousel import (
     CarouselController,
+    NAME_OVERLAY_PLACEMENTS,
     SnapshotCache,
     split_url_credentials,
+    stream_playback_config,
+    stream_name_position,
     wrapped_index,
 )
 
@@ -60,14 +63,35 @@ class Response:
 
 class CarouselValidationTests(unittest.TestCase):
     def test_valid_shape_and_panel_seconds(self):
-        validate_rtsp_carousel_pane(
-            carousel_pane(
-                snapshot_refresh_seconds=10,
-                cycle_seconds=30,
-                show_controls=True,
-                show_stream_name=True,
-            )
+        pane = carousel_pane(
+            snapshot_refresh_seconds=10,
+            cycle_seconds=30,
+            show_controls=True,
+            stream_name_position="bottom-right",
+            stream_name_font_size=24,
         )
+        pane["streams"][0].update(
+            fit="cover",
+            hwdec="drm-copy",
+            rtsp_transport="tcp",
+            audio=True,
+            mpv_args=["--framedrop=yes"],
+        )
+        validate_rtsp_carousel_pane(pane)
+
+    def test_validates_name_position_and_font_size(self):
+        for value in ("corner", "", 42):
+            with self.subTest(position=value):
+                with self.assertRaises(ValueError):
+                    validate_rtsp_carousel_pane(
+                        carousel_pane(stream_name_position=value)
+                    )
+        for value in (0, -1, "large", True):
+            with self.subTest(font_size=value):
+                with self.assertRaises(ValueError):
+                    validate_rtsp_carousel_pane(
+                        carousel_pane(stream_name_font_size=value)
+                    )
 
     def test_snapshot_only_stream_is_valid(self):
         validate_rtsp_carousel_pane(
@@ -97,6 +121,22 @@ class CarouselValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "belongs to"):
             validate_rtsp_carousel_pane(pane)
 
+    def test_rejects_invalid_per_stream_playback_settings(self):
+        invalid_settings = (
+            {"fit": "stretch"},
+            {"hwdec": 42},
+            {"rtsp_transport": "http"},
+            {"audio": "yes"},
+            {"mpv_args": "--framedrop=yes"},
+            {"mpv_args": [42]},
+        )
+        for settings in invalid_settings:
+            with self.subTest(settings=settings):
+                pane = carousel_pane()
+                pane["streams"][0].update(settings)
+                with self.assertRaises(ValueError):
+                    validate_rtsp_carousel_pane(pane)
+
     def test_layout_preflight_identifies_bad_pane(self):
         with self.assertRaisesRegex(ValueError, r"pane\[1\]"):
             validate_carousels_in_layout(
@@ -114,8 +154,16 @@ class CarouselValidationTests(unittest.TestCase):
 
 class CommandTests(unittest.TestCase):
     def test_embedded_mpv_command_uses_wid_and_ipc(self):
+        pane = carousel_pane()
+        pane["streams"][0].update(
+            fit="cover",
+            hwdec="drm-copy",
+            rtsp_transport="tcp",
+            audio=True,
+            mpv_args=["--framedrop=yes"],
+        )
         cmd = build_mpv_rtsp_command(
-            carousel_pane(fit="cover", rtsp_transport="tcp"),
+            stream_playback_config(pane, pane["streams"][0]),
             "rtsp://front/live",
             title="carousel-video",
             wid=1234,
@@ -125,12 +173,38 @@ class CommandTests(unittest.TestCase):
         self.assertIn("--wid=1234", cmd)
         self.assertIn("--input-ipc-server=/tmp/mpv.sock", cmd)
         self.assertIn("--panscan=1.0", cmd)
+        self.assertIn("--hwdec=drm-copy", cmd)
+        self.assertIn("--demuxer-lavf-o=rtsp_transport=tcp", cmd)
+        self.assertNotIn("--no-audio", cmd)
+        self.assertIn("--framedrop=yes", cmd)
         self.assertEqual(cmd.count("rtsp://front/live"), 1)
+
+    def test_stream_options_override_legacy_panel_defaults(self):
+        pane = carousel_pane(fit="contain", hwdec="v4l2m2m-copy", audio=True)
+        stream = pane["streams"][0]
+        stream.update(fit="cover", hwdec="drm-copy", audio=False)
+
+        config = stream_playback_config(pane, stream)
+
+        self.assertEqual(config["fit"], "cover")
+        self.assertEqual(config["hwdec"], "drm-copy")
+        self.assertFalse(config["audio"])
 
     def test_wraps_both_directions(self):
         self.assertEqual(wrapped_index(2, 2), 0)
         self.assertEqual(wrapped_index(-1, 2), 1)
         self.assertEqual(wrapped_index(0, 0), 0)
+
+    def test_name_positions_cover_nine_locations_and_legacy_toggle(self):
+        self.assertEqual(len(NAME_OVERLAY_PLACEMENTS), 9)
+        self.assertEqual(stream_name_position({"show_stream_name": True}), "top")
+        self.assertIsNone(stream_name_position({"show_stream_name": False}))
+        for position in NAME_OVERLAY_PLACEMENTS:
+            with self.subTest(position=position):
+                self.assertEqual(
+                    stream_name_position({"stream_name_position": position}),
+                    position,
+                )
 
 
 class SnapshotCacheTests(unittest.TestCase):
@@ -336,9 +410,12 @@ class EditorHtmlTests(unittest.TestCase):
             'id="p-snapshot-refresh"',
             'id="p-cycle-seconds"',
             'id="p-show-controls"',
-            'id="p-show-stream-name"',
+            'id="p-stream-name-position"',
+            'id="p-stream-name-font-size"',
             "function addCarouselStream()",
             "function moveCarouselStream(index, delta)",
+            "MPV args (one argument per line)",
+            "function migrateCarouselStreamOptions(p)",
         ):
             self.assertIn(marker, html)
 

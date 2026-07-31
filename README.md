@@ -274,19 +274,26 @@ curl -X POST http://pi:8686/pane \
       {
         "name": "Front Door",
         "url": "rtsp://192.168.1.101/live",
-        "snapshot_url": "http://192.168.1.101/snapshot.jpg"
+        "snapshot_url": "http://192.168.1.101/snapshot.jpg",
+        "fit": "cover",
+        "hwdec": "v4l2m2m-copy",
+        "rtsp_transport": "tcp",
+        "audio": false
       },
       {
         "name": "Back Yard",
         "url": "rtsp://192.168.1.102/live",
-        "snapshot_url": "http://192.168.1.102/snapshot.jpg"
+        "snapshot_url": "http://192.168.1.102/snapshot.jpg",
+        "fit": "contain",
+        "hwdec": "drm-copy",
+        "mpv_args": ["--framedrop=yes"]
       }
     ],
     "snapshot_refresh_seconds": 10,
     "show_controls": true,
-    "show_stream_name": true,
+    "stream_name_position": "top",
+    "stream_name_font_size": 24,
     "cycle_seconds": 30,
-    "fit": "cover",
     "x": 0, "y": 0, "w": 1.0, "h": 1.0
   }'
 ```
@@ -295,16 +302,31 @@ Carousel fields:
 
 | Field | Purpose | Default |
 |-------|---------|---------|
-| `streams` | Non-empty array of `{name, url?, snapshot_url?}` objects. A name and at least one URL are required. | required |
+| `streams` | Non-empty array of stream objects. A name and at least one of `url` or `snapshot_url` are required. | required |
 | `snapshot_refresh_seconds` | Refresh every configured snapshot endpoint at this panel-wide frequency. Omit or use `0` to fetch each once at pane startup. | `0` |
 | `cycle_seconds` | Automatically advance and wrap after this many seconds. Manual navigation resets the timer. | `0` (off) |
 | `show_controls` | Show always-visible previous/next buttons when at least two streams exist. | `false` |
-| `show_stream_name` | Show the current stream name at the top center. | `false` |
+| `stream_name_position` | Camera-name overlay location: `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, or `bottom-right`. Omit to hide it. | hidden |
+| `stream_name_font_size` | Camera-name overlay font size in pixels. Omit for responsive sizing. | automatic |
 
-The normal RTSP options (`fit`, `hwdec`, `rtsp_transport`, `audio`, and
-`mpv_args`) apply to every stream in the carousel. Snapshot downloads run in
-the background and never delay RTSP startup. Failed refreshes retain the last
-good cached image.
+Stream fields:
+
+| Field | Purpose | Default |
+|-------|---------|---------|
+| `name` | Camera name used by the optional overlay. | required |
+| `url` | RTSP URL. Optional for snapshot-only entries. | — |
+| `snapshot_url` | HTTP/HTTPS image displayed before playback or for snapshot-only entries. | — |
+| `fit` | `fill`, `cover`, or `contain`, applied to this stream's video and snapshot. | `fill` |
+| `hwdec` | MPV hardware decoder for this stream, such as `v4l2m2m-copy` or `drm-copy`. | server default |
+| `rtsp_transport` | `tcp` or `udp` for this stream. | server default |
+| `audio` | Decode audio for this stream. | `false` |
+| `mpv_args` | Additional MPV arguments for this stream. | `[]` |
+
+Legacy carousel definitions with these playback fields at pane level remain
+loadable; the visual editor migrates them into each stream. Snapshot downloads
+run in the background and never delay RTSP startup. Failed refreshes retain the
+last good cached image. The legacy `show_stream_name: true` setting remains
+supported and maps to `stream_name_position: "top"`.
 
 ### RTSP speed and codecs (e.g. Intelbras DVR)
 

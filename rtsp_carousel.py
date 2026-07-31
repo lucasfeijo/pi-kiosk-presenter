@@ -15,7 +15,12 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Optional
 
-from display_server import build_mpv_rtsp_command, validate_rtsp_carousel_pane
+from display_server import (
+    RTSP_STREAM_FIELDS,
+    STREAM_NAME_POSITIONS,
+    build_mpv_rtsp_command,
+    validate_rtsp_carousel_pane,
+)
 
 
 logging.basicConfig(
@@ -25,6 +30,18 @@ logging.basicConfig(
 log = logging.getLogger("rtsp-carousel")
 
 SNAPSHOT_TIMEOUT_SECONDS = 5
+NAME_OVERLAY_PLACEMENTS = {
+    "top-left": {"relx": 0, "rely": 0, "x": 10, "y": 10, "anchor": "nw"},
+    "top": {"relx": 0.5, "rely": 0, "y": 10, "anchor": "n"},
+    "top-right": {"relx": 1, "rely": 0, "x": -10, "y": 10, "anchor": "ne"},
+    "left": {"relx": 0, "rely": 0.5, "x": 10, "anchor": "w"},
+    "center": {"relx": 0.5, "rely": 0.5, "anchor": "center"},
+    "right": {"relx": 1, "rely": 0.5, "x": -10, "anchor": "e"},
+    "bottom-left": {"relx": 0, "rely": 1, "x": 10, "y": -10, "anchor": "sw"},
+    "bottom": {"relx": 0.5, "rely": 1, "y": -10, "anchor": "s"},
+    "bottom-right": {"relx": 1, "rely": 1, "x": -10, "y": -10, "anchor": "se"},
+}
+assert tuple(NAME_OVERLAY_PLACEMENTS) == STREAM_NAME_POSITIONS
 
 
 def wrapped_index(index: int, count: int) -> int:
@@ -54,6 +71,25 @@ def split_url_credentials(
         urllib.parse.unquote(parsed.username),
         urllib.parse.unquote(parsed.password or ""),
     )
+
+
+def stream_playback_config(pane: dict, stream: dict) -> dict:
+    """Resolve per-stream playback settings with legacy pane-level fallbacks."""
+    return {
+        key: stream[key] if key in stream else pane[key]
+        for key in RTSP_STREAM_FIELDS
+        if key in stream or key in pane
+    }
+
+
+def stream_name_position(pane: dict) -> Optional[str]:
+    """Resolve the current name location, including the legacy boolean flag."""
+    position = pane.get("stream_name_position")
+    if position in NAME_OVERLAY_PLACEMENTS:
+        return position
+    if pane.get("show_stream_name"):
+        return "top"
+    return None
 
 
 class SnapshotCache:
@@ -313,8 +349,9 @@ class CarouselController:
             pass
         stream = self.streams[index]
         url = (stream.get("url") or "").strip()
+        playback_config = stream_playback_config(self.pane, stream)
         cmd = build_mpv_rtsp_command(
-            self.pane,
+            playback_config,
             url,
             title="pi-display-carousel-video",
             wid=self.video_wid,
@@ -514,7 +551,9 @@ class CarouselController:
             self._raise_overlays()
 
     def _fit_snapshot(self, image, width: int, height: int):
-        fit = self.pane.get("fit", "fill")
+        fit = stream_playback_config(
+            self.pane, self.streams[self.current_index]
+        ).get("fit", "fill")
         resampling = getattr(self.Image, "Resampling", self.Image).LANCZOS
         if fit == "fill":
             return image.resize((width, height), resampling)
@@ -543,9 +582,10 @@ class CarouselController:
         return canvas
 
     def _update_name(self):
-        if self.pane.get("show_stream_name"):
+        position = stream_name_position(self.pane)
+        if position:
             self.name_label.configure(text=self.streams[self.current_index]["name"])
-            self.name_label.place(relx=0.5, y=10, anchor="n")
+            self.name_label.place(**NAME_OVERLAY_PLACEMENTS[position])
         else:
             self.name_label.place_forget()
         self._raise_overlays()
@@ -554,10 +594,16 @@ class CarouselController:
         width = max(1, self.root.winfo_width())
         height = max(1, self.root.winfo_height())
         button_font = max(20, min(48, int(height * 0.11)))
-        name_font = max(11, min(26, int(height * 0.045)))
+        configured_name_font = self.pane.get("stream_name_font_size")
+        name_font = (
+            max(1, int(float(configured_name_font)))
+            if configured_name_font not in (None, "")
+            else max(11, min(26, int(height * 0.045)))
+        )
         self.prev_button.configure(font=("DejaVu Sans", button_font, "bold"))
         self.next_button.configure(font=("DejaVu Sans", button_font, "bold"))
-        self.name_label.configure(font=("DejaVu Sans", name_font, "bold"))
+        # Tk uses negative font sizes to request exact pixel sizing.
+        self.name_label.configure(font=("DejaVu Sans", -name_font, "bold"))
         if self.pane.get("show_controls") and len(self.streams) > 1:
             self.prev_button.place(relx=0.02, rely=0.5, anchor="w")
             self.next_button.place(relx=0.98, rely=0.5, anchor="e")
@@ -567,7 +613,7 @@ class CarouselController:
         self._update_name()
 
     def _raise_overlays(self):
-        if self.pane.get("show_stream_name"):
+        if stream_name_position(self.pane):
             self.name_label.lift()
         if self.pane.get("show_controls") and len(self.streams) > 1:
             self.prev_button.lift()
