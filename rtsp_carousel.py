@@ -140,6 +140,12 @@ class CarouselController:
         self.cycle_after = None
         self.retry_after = None
         self.snapshot_photo = None
+        cache_dir = os.path.join(self.runtime_dir, "snapshots")
+        self.snapshots = SnapshotCache(
+            self.streams,
+            cache_dir,
+            self.pane.get("snapshot_refresh_seconds", 0),
+        )
 
         x, y, width, height = [int(value) for value in config["geom"]]
         self.root = tk.Tk()
@@ -199,13 +205,6 @@ class CarouselController:
         self.root.bind("<Configure>", self._on_configure)
         self.root.update_idletasks()
         self.video_wid = self.video_host.winfo_id()
-
-        cache_dir = os.path.join(self.runtime_dir, "snapshots")
-        self.snapshots = SnapshotCache(
-            self.streams,
-            cache_dir,
-            self.pane.get("snapshot_refresh_seconds", 0),
-        )
 
     def run(self):
         self.snapshots.start()
