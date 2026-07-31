@@ -4,6 +4,7 @@ import signal
 import subprocess
 import tempfile
 import unittest
+import urllib.request
 from unittest import mock
 
 import display_server
@@ -15,7 +16,12 @@ from display_server import (
     validate_carousels_in_layout,
     validate_rtsp_carousel_pane,
 )
-from rtsp_carousel import CarouselController, SnapshotCache, wrapped_index
+from rtsp_carousel import (
+    CarouselController,
+    SnapshotCache,
+    split_url_credentials,
+    wrapped_index,
+)
 
 
 def carousel_pane(**overrides):
@@ -128,6 +134,61 @@ class CommandTests(unittest.TestCase):
 
 
 class SnapshotCacheTests(unittest.TestCase):
+    def test_splits_and_decodes_embedded_url_credentials(self):
+        clean_url, username, password = split_url_credentials(
+            "http://admin:p%40ss@camera:8080/snapshot.jpg?channel=1"
+        )
+
+        self.assertEqual(
+            clean_url, "http://camera:8080/snapshot.jpg?channel=1"
+        )
+        self.assertEqual(username, "admin")
+        self.assertEqual(password, "p@ss")
+
+    @mock.patch("rtsp_carousel.urllib.request.build_opener")
+    def test_embedded_credentials_use_digest_and_basic_auth(self, build_opener):
+        authenticated_opener = build_opener.return_value
+        authenticated_opener.open.return_value = Response(b"jpeg")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = SnapshotCache([], tmp)
+            self.assertTrue(
+                cache.fetch_one(
+                    0,
+                    "http://admin:secret@camera/snapshot.jpg?channel=18",
+                )
+            )
+
+        request = authenticated_opener.open.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "http://camera/snapshot.jpg?channel=18",
+        )
+        handlers = build_opener.call_args.args
+        self.assertIsInstance(handlers[0], urllib.request.HTTPDigestAuthHandler)
+        self.assertIsInstance(handlers[1], urllib.request.HTTPBasicAuthHandler)
+
+    @mock.patch("rtsp_carousel.urllib.request.build_opener")
+    def test_snapshot_failure_does_not_log_credentials(self, build_opener):
+        build_opener.return_value.open.side_effect = OSError(
+            "http://admin:secret@camera is offline"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = SnapshotCache([], tmp)
+            with mock.patch("rtsp_carousel.log.warning") as warning:
+                self.assertFalse(
+                    cache.fetch_one(
+                        0,
+                        "http://admin:secret@camera/snapshot.jpg",
+                    )
+                )
+
+        logged = " ".join(str(value) for value in warning.call_args.args)
+        self.assertNotIn("admin", logged)
+        self.assertNotIn("secret", logged)
+        self.assertNotIn("camera", logged)
+
     def test_warms_each_configured_snapshot_once_without_interval(self):
         calls = []
 

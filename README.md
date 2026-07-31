@@ -260,6 +260,10 @@ entries never launch `mpv`; they display the fetched image until the carousel
 advances. Without `snapshot_refresh_seconds`, each snapshot is fetched once at
 pane startup and is not refreshed again.
 
+Snapshot endpoints that require HTTP authentication may embed credentials as
+`http://user:password@camera/snapshot.jpg`. Both Digest and Basic authentication
+are supported, and credentials are omitted from carousel logs.
+
 ```bash
 curl -X POST http://pi:8686/pane \
   -H 'Content-Type: application/json' \

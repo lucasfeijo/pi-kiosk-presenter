@@ -11,6 +11,7 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.parse
 import urllib.request
 from typing import Callable, Optional
 
@@ -29,6 +30,30 @@ SNAPSHOT_TIMEOUT_SECONDS = 5
 def wrapped_index(index: int, count: int) -> int:
     """Wrap an index in either direction."""
     return index % count if count else 0
+
+
+def split_url_credentials(
+    url: str,
+) -> tuple[str, Optional[str], Optional[str]]:
+    """Return a request-safe URL and decoded embedded credentials, if present."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.username is None:
+        return url, None, None
+
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    if parsed.port is not None:
+        hostname = f"{hostname}:{parsed.port}"
+
+    clean_url = urllib.parse.urlunsplit(
+        (parsed.scheme, hostname, parsed.path, parsed.query, parsed.fragment)
+    )
+    return (
+        clean_url,
+        urllib.parse.unquote(parsed.username),
+        urllib.parse.unquote(parsed.password or ""),
+    )
 
 
 class SnapshotCache:
@@ -81,11 +106,7 @@ class SnapshotCache:
         destination = self.path_for(index)
         temporary = destination + ".part"
         try:
-            request = urllib.request.Request(
-                url,
-                headers={"User-Agent": "pi-display-server/rtsp-carousel"},
-            )
-            with self.opener(request, timeout=SNAPSHOT_TIMEOUT_SECONDS) as response:
+            with self._open_snapshot(url) as response:
                 data = response.read()
             if not data:
                 raise ValueError("empty response")
@@ -97,15 +118,38 @@ class SnapshotCache:
                     self.on_update(index)
                 except Exception:
                     log.exception("Snapshot %d update callback failed", index)
-            log.debug("Snapshot %d refreshed from %s", index, url)
+            log.debug("Snapshot %d refreshed", index)
             return True
         except Exception as exc:
-            log.warning("Snapshot %d refresh failed (%s): %s", index, url, exc)
+            # Snapshot URLs can contain credentials. Never include the URL or an
+            # exception message that may echo it in logs.
+            log.warning(
+                "Snapshot %d refresh failed: %s", index, type(exc).__name__
+            )
             try:
                 os.unlink(temporary)
             except OSError:
                 pass
             return False
+
+    def _open_snapshot(self, url: str):
+        clean_url, username, password = split_url_credentials(url)
+        request = urllib.request.Request(
+            clean_url,
+            headers={"User-Agent": "pi-display-server/rtsp-carousel"},
+        )
+        if username is None:
+            return self.opener(request, timeout=SNAPSHOT_TIMEOUT_SECONDS)
+
+        password_manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        password_manager.add_password(None, clean_url, username, password or "")
+        authenticated_opener = urllib.request.build_opener(
+            urllib.request.HTTPDigestAuthHandler(password_manager),
+            urllib.request.HTTPBasicAuthHandler(password_manager),
+        )
+        return authenticated_opener.open(
+            request, timeout=SNAPSHOT_TIMEOUT_SECONDS
+        )
 
     def _run(self):
         # Always warm every configured endpoint once, without blocking playback.
