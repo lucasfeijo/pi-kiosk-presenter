@@ -5,18 +5,20 @@ Pi Display Server — remote control what your Raspberry Pi shows on HDMI.
 Runs an HTTP server that accepts JSON layout descriptions and manages X11
 windows accordingly (mpv for RTSP/video, chromium for web, feh for images, etc.).
 
-Requires: Python 3.9+, xdotool, xdpyinfo, mpv, chromium-browser, feh
+Requires: Python 3.9+, xdotool, xdpyinfo, mpv, chromium, feh, Tk, Pillow
 """
 
 import json
 import logging
 import os
 import re
+import shutil
 import shlex
 import signal
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -54,6 +56,80 @@ INPUT_ROTATION_INTERVAL = max(
 INPUT_DEVICE_PATTERN = os.environ.get(
     "INPUT_DEVICE_PATTERN", r"(touch|stylus|mouse|tablet)"
 )
+RTSP_CAROUSEL_TYPE = "rtsp_carousel"
+
+
+def _optional_nonnegative_number(value, field_name: str):
+    """Validate an optional seconds field, accepting 0 as disabled."""
+    if value in (None, ""):
+        return
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a non-negative number")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be a non-negative number") from None
+    if parsed < 0:
+        raise ValueError(f"{field_name} must be a non-negative number")
+
+
+def validate_rtsp_carousel_pane(pane: dict):
+    """Validate the public rtsp_carousel pane shape without mutating it."""
+    if not isinstance(pane, dict):
+        raise ValueError("pane must be an object")
+    if pane.get("type") != RTSP_CAROUSEL_TYPE:
+        return
+
+    streams = pane.get("streams")
+    if not isinstance(streams, list) or not streams:
+        raise ValueError("rtsp_carousel streams must be a non-empty array")
+    for index, stream in enumerate(streams):
+        if not isinstance(stream, dict):
+            raise ValueError(f"rtsp_carousel streams[{index}] must be an object")
+        for key in ("name", "url"):
+            value = stream.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"rtsp_carousel streams[{index}].{key} must be a non-empty string"
+                )
+        snapshot_url = stream.get("snapshot_url")
+        if snapshot_url is not None and (
+            not isinstance(snapshot_url, str) or not snapshot_url.strip()
+        ):
+            raise ValueError(
+                f"rtsp_carousel streams[{index}].snapshot_url must be a non-empty string"
+            )
+        if "snapshot_refresh_seconds" in stream:
+            raise ValueError(
+                "snapshot_refresh_seconds belongs to the rtsp_carousel pane, "
+                "not individual streams"
+            )
+
+    _optional_nonnegative_number(
+        pane.get("snapshot_refresh_seconds"), "snapshot_refresh_seconds"
+    )
+    _optional_nonnegative_number(pane.get("cycle_seconds"), "cycle_seconds")
+    for key in ("show_controls", "show_stream_name"):
+        if key in pane and not isinstance(pane[key], bool):
+            raise ValueError(f"{key} must be a boolean")
+    if "mpv_args" in pane and (
+        not isinstance(pane["mpv_args"], list)
+        or not all(isinstance(arg, str) for arg in pane["mpv_args"])
+    ):
+        raise ValueError("mpv_args must be an array of strings")
+
+
+def validate_carousels_in_layout(layout: list[dict]):
+    """Preflight every carousel before a layout can disturb live panes."""
+    if not isinstance(layout, list):
+        raise ValueError("layout must be an array")
+    for index, pane in enumerate(layout):
+        if not isinstance(pane, dict):
+            raise ValueError(f"pane[{index}] must be an object")
+        try:
+            validate_rtsp_carousel_pane(pane)
+        except ValueError as exc:
+            raise ValueError(f"pane[{index}]: {exc}") from None
 
 
 def _chromium_user_data_dir(pane: dict) -> str:
@@ -122,6 +198,75 @@ def _mpv_rtsp_perf_args(pane: dict) -> list[str]:
     if extra:
         args.extend(shlex.split(extra))
     return args
+
+
+def build_mpv_rtsp_command(
+    pane: dict,
+    url: str,
+    *,
+    title: str,
+    geom: Optional[tuple[int, int, int, int]] = None,
+    wid: Optional[int] = None,
+    ipc_path: Optional[str] = None,
+) -> list[str]:
+    """Build the shared low-latency mpv command for normal and carousel RTSP."""
+    fit = pane.get("fit", "fill")
+    if fit == "fill":
+        aspect_args = ["--keepaspect=no"]
+    elif fit == "cover":
+        aspect_args = [
+            "--keepaspect=yes",
+            "--panscan=1.0",
+            "--video-align-x=0",
+            "--video-align-y=0",
+        ]
+    elif fit == "contain":
+        aspect_args = ["--keepaspect=yes"]
+    else:
+        log.warning("Unknown fit mode '%s', defaulting to fill", fit)
+        aspect_args = ["--keepaspect=no"]
+
+    stream_pane = {**pane, "url": url}
+    hwdec = stream_pane.get("hwdec") or MPV_HWDEC
+    window_args: list[str] = []
+    if wid is not None:
+        window_args.extend(
+            [
+                f"--wid={wid}",
+                "--auto-window-resize=no",
+                "--focus-on=never",
+                "--x11-wid-title=no",
+            ]
+        )
+    elif geom is not None:
+        x, y, w, h = geom
+        window_args.extend(
+            [
+                f"--geometry={w}x{h}+{x}+{y}",
+                f"--autofit={w}x{h}",
+            ]
+        )
+    if ipc_path:
+        window_args.append(f"--input-ipc-server={ipc_path}")
+
+    cmd = [
+        "mpv",
+        f"--title={title}",
+        "--no-terminal",
+        "--no-osc",
+        "--no-input-default-bindings",
+        "--force-window=yes",
+        "--no-border",
+        "--no-keepaspect-window",
+        f"--hwdec={hwdec}",
+        *window_args,
+        *aspect_args,
+        "--profile=low-latency",
+        *_mpv_rtsp_perf_args(stream_pane),
+        url,
+        *stream_pane.get("mpv_args", []),
+    ]
+    return ["nice", "-n", "-10", "ionice", "-c", "1", "-n", "4", *cmd]
 
 
 def _rotation_to_matrix(rotation: str) -> Optional[tuple[str, ...]]:
@@ -287,6 +432,8 @@ class ManagedPane:
     ptype: str
     proc: subprocess.Popen
     wid: Optional[int] = None
+    process_group: bool = False
+    runtime_dir: Optional[str] = field(default=None, repr=False)
     _refresh_stop: Optional[Event] = field(default=None, repr=False)
     _refresh_thread: Optional[Thread] = field(default=None, repr=False)
 
@@ -359,6 +506,10 @@ class DisplayManager:
             panes = scr.get("panes", [])
             if not isinstance(panes, list):
                 raise ValueError(f"screen[{i}].panes must be an array")
+            try:
+                validate_carousels_in_layout(panes)
+            except ValueError as exc:
+                raise ValueError(f"screen[{i}]: {exc}") from None
             normalized.append({"name": str(scr.get("name") or f"Screen {i+1}"), "panes": panes})
         playing = doc.get("playingIndex", 0)
         if not isinstance(playing, int) or playing < 0 or playing >= len(normalized):
@@ -423,61 +574,57 @@ class DisplayManager:
         if panes:
             log.info("Restoring screen '%s' (%d panes)",
                      self._screens_doc["screens"][idx]["name"], len(panes))
-            self.apply_layout(panes)
+            try:
+                self.apply_layout(panes)
+            except ValueError as exc:
+                log.error("Saved layout validation failed; panes were not started: %s", exc)
 
     # -- launchers ----------------------------------------------------------
 
     def _launch_rtsp(self, pane: dict, geom: tuple[int, int, int, int]) -> subprocess.Popen:
         url = pane["url"]
-        extra = pane.get("mpv_args", [])
-        fit = pane.get("fit", "fill")
-        x, y, w, h = geom
-
-        # fit modes:
-        #   "fill"    — stretch to fill the region exactly (no aspect ratio)
-        #   "cover"   — keep aspect ratio, crop to fill (no black bars)
-        #   "contain" — keep aspect ratio, fit inside (may have black bars)
-        if fit == "fill":
-            aspect_args = ["--keepaspect=no"]
-        elif fit == "cover":
-            aspect_args = [
-                "--keepaspect=yes",
-                "--panscan=1.0",
-                "--video-align-x=0",
-                "--video-align-y=0",
-            ]
-        elif fit == "contain":
-            aspect_args = ["--keepaspect=yes"]
-        else:
-            log.warning("Unknown fit mode '%s', defaulting to fill", fit)
-            aspect_args = ["--keepaspect=no"]
-
         name = pane.get("name", "rtsp")
-        hwdec = pane.get("hwdec") or MPV_HWDEC
-        cmd = [
-            "mpv",
-            f"--title={name}",
-            "--no-terminal",
-            "--no-osc",
-            "--no-input-default-bindings",
-            "--force-window=yes",
-            "--no-border",
-            "--no-keepaspect-window",
-            f"--hwdec={hwdec}",
-            f"--geometry={w}x{h}+{x}+{y}",
-            f"--autofit={w}x{h}",
-            *aspect_args,
-            "--profile=low-latency",
-            *_mpv_rtsp_perf_args(pane),
-            url,
-            *extra,
-        ]
+        cmd = build_mpv_rtsp_command(pane, url, title=name, geom=geom)
         log.info("Launching mpv: %s", " ".join(cmd))
-        # High CPU priority + real-time I/O for smooth playback
         return subprocess.Popen(
-            ["nice", "-n", "-10", "ionice", "-c", "1", "-n", "4", *cmd],
+            cmd,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+
+    def _launch_rtsp_carousel(
+        self, pane: dict, geom: tuple[int, int, int, int]
+    ) -> subprocess.Popen:
+        validate_rtsp_carousel_pane(pane)
+        name = pane.get("name", RTSP_CAROUSEL_TYPE)
+        runtime_dir = tempfile.mkdtemp(prefix="pi-display-carousel-")
+        config_path = os.path.join(runtime_dir, "config.json")
+        config = {
+            "pane": pane,
+            "geom": list(geom),
+            "runtime_dir": runtime_dir,
+            "watchdog_interval": WATCHDOG_INTERVAL,
+        }
+        try:
+            with open(config_path, "w") as f:
+                json.dump(config, f)
+            controller = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "rtsp_carousel.py"
+            )
+            cmd = [sys.executable, controller, "--config", config_path]
+            log.info(
+                "Launching RTSP carousel '%s' with %d streams",
+                name,
+                len(pane["streams"]),
+            )
+            proc = subprocess.Popen(
+                cmd,
+                start_new_session=True,
+            )
+            proc._pi_runtime_dir = runtime_dir
+            return proc
+        except Exception:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+            raise
 
     def _launch_web(self, pane: dict, geom: tuple[int, int, int, int]) -> subprocess.Popen:
         url = pane["url"]
@@ -607,6 +754,7 @@ class DisplayManager:
     LAUNCHERS = {
         "rtsp": _launch_rtsp,
         "stream": _launch_rtsp,     # alias
+        RTSP_CAROUSEL_TYPE: _launch_rtsp_carousel,
         "web": _launch_web,
         "browser": _launch_web,     # alias
         "image": _launch_image,
@@ -623,6 +771,7 @@ class DisplayManager:
         processes at once and positions windows in background threads so
         the HTTP response returns immediately.
         """
+        validate_carousels_in_layout(layout)
         with self.lock:
             self._kill_all()
             self._current_layout = layout
@@ -637,7 +786,7 @@ class DisplayManager:
                         continue
                     geom = resolve_region(pane, self.screen_w, self.screen_h)
                     proc = launcher(self, pane, geom)
-                    self.panes[name] = ManagedPane(name=name, ptype=ptype, proc=proc)
+                    self.panes[name] = self._make_managed_pane(name, ptype, proc)
                     launched.append((pane, name, proc, geom))
                 except Exception:
                     log.exception("Failed to launch pane '%s'",
@@ -694,6 +843,7 @@ class DisplayManager:
 
     def add_pane(self, pane: dict):
         """Add a single pane without disturbing existing ones."""
+        validate_rtsp_carousel_pane(pane)
         with self.lock:
             # Update stored layout: replace existing pane with same name or append
             name = pane.get("name", pane.get("type", ""))
@@ -829,8 +979,21 @@ class DisplayManager:
 
     # -- internals ----------------------------------------------------------
 
+    @staticmethod
+    def _make_managed_pane(
+        name: str, ptype: str, proc: subprocess.Popen
+    ) -> ManagedPane:
+        return ManagedPane(
+            name=name,
+            ptype=ptype,
+            proc=proc,
+            process_group=(ptype == RTSP_CAROUSEL_TYPE),
+            runtime_dir=getattr(proc, "_pi_runtime_dir", None),
+        )
+
     def _add_pane(self, pane: dict):
         """Launch a single pane and position it (blocking). Used by add_pane and watchdog."""
+        validate_rtsp_carousel_pane(pane)
         ptype = pane.get("type", "")
         name = pane.get("name", ptype)
 
@@ -845,7 +1008,7 @@ class DisplayManager:
 
         geom = resolve_region(pane, self.screen_w, self.screen_h)
         proc = launcher(self, pane, geom)
-        self.panes[name] = ManagedPane(name=name, ptype=ptype, proc=proc)
+        self.panes[name] = self._make_managed_pane(name, ptype, proc)
         self._position_pane(pane, name, proc, geom)
         raise_window_stack(self._current_layout, self.panes)
 
@@ -862,7 +1025,9 @@ class DisplayManager:
                     log.warning(
                         "Pane '%s' exited (code=%s), restarting…", name, exit_code
                     )
-                    self.panes.pop(name, None)
+                    # A carousel controller may have left an mpv child behind in
+                    # its process group, so always run the full cleanup path.
+                    self._kill_pane(name)
                     try:
                         self._add_pane(pane_def)
                     except Exception:
@@ -1056,15 +1221,53 @@ class DisplayManager:
         mp._refresh_stop = None
         mp._refresh_thread = None
 
+    @staticmethod
+    def _process_group_alive(pgid: int) -> bool:
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
     def _kill_pane(self, name: str):
         mp = self.panes.pop(name, None)
         if not mp:
             return
         self._stop_auto_refresh_mp(mp)
-        if mp.proc.poll() is None:
+        if mp.process_group:
+            log.info("Stopping pane group '%s' (pgid=%d)", name, mp.proc.pid)
+            try:
+                os.killpg(mp.proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                mp.proc.poll()  # Reap an exited controller before probing its group.
+                if not self._process_group_alive(mp.proc.pid):
+                    break
+                time.sleep(0.05)
+            mp.proc.poll()
+            if self._process_group_alive(mp.proc.pid):
+                try:
+                    os.killpg(mp.proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                mp.proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                log.warning("Pane group '%s' controller did not exit", name)
+            if self._process_group_alive(mp.proc.pid):
+                time.sleep(0.1)
+            if self._process_group_alive(mp.proc.pid):
+                log.warning("Pane group '%s' still has live processes", name)
+        elif mp.proc.poll() is None:
             log.info("Killing pane '%s' (pid=%d)", name, mp.proc.pid)
             mp.proc.kill()
             mp.proc.wait()
+        if mp.runtime_dir:
+            shutil.rmtree(mp.runtime_dir, ignore_errors=True)
 
     def _kill_all(self):
         for name in list(self.panes):
@@ -1318,6 +1521,16 @@ details textarea{{width:100%;min-height:160px;margin-top:8px;background:#0d1117;
   font-size:12px;resize:vertical;tab-size:2}}
 .info-line{{color:#8b949e;font-size:12px;margin-bottom:10px}}
 label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight:normal}}
+label.inline input{{width:auto}}
+.stream-editor{{margin-top:10px;padding-top:8px;border-top:1px solid #30363d}}
+.stream-row{{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px;margin:7px 0}}
+.stream-row-head{{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  color:#e6edf3;font-size:12px;font-weight:600}}
+.stream-row-actions{{display:flex;gap:4px}}
+.stream-row-actions button{{padding:2px 7px;font-size:11px;background:#30363d;color:#e6edf3}}
+.stream-row-actions button.danger{{background:#da3633;color:#fff}}
+.stream-row input{{font-size:12px;padding:5px 7px}}
+.stream-row label{{font-size:11px;margin-top:6px}}
 .sys-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}
 @media(max-width:500px){{.sys-grid{{grid-template-columns:1fr}}}}
 .sys-stat{{text-align:center}}
@@ -1384,15 +1597,16 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
     <h2>Properties</h2>
     <label>Name</label><input id="p-name" oninput="updateProp('name',this.value)">
     <label>Type</label>
-    <select id="p-type" onchange="updateProp('type',this.value)">
-      <option value="rtsp">rtsp</option><option value="web">web</option>
+    <select id="p-type" onchange="updatePaneType(this.value)">
+      <option value="rtsp">rtsp</option><option value="rtsp_carousel">rtsp_carousel</option>
+      <option value="web">web</option>
       <option value="image">image</option><option value="command">command</option>
       <option value="stats">stats</option><option value="clock">clock</option>
     </select>
     <div id="url-row">
     <label>URL / Path</label><input id="p-url" oninput="updateUrlProp(this.value)">
     </div>
-    <label>Fit (rtsp only)</label>
+    <label>Fit (rtsp / carousel)</label>
     <select id="p-fit" onchange="updateProp('fit',this.value)">
       <option value="fill">fill</option><option value="cover">cover</option><option value="contain">contain</option>
     </select>
@@ -1412,6 +1626,17 @@ label.inline{{display:flex;align-items:center;gap:8px;margin-top:8px;font-weight
       <option value="udp">udp (faster LAN)</option>
     </select>
     <label class="inline"><input type="checkbox" id="p-audio" onchange="updateAudio(this.checked)"> Decode audio</label>
+    </div>
+    <div id="carousel-extra" class="stream-editor" style="display:none">
+      <label style="margin-top:0">Streams</label>
+      <div id="p-streams"></div>
+      <button class="btn-secondary btn-sm" style="width:100%" onclick="addCarouselStream()">+ Add Stream</button>
+      <label title="Refresh every configured snapshot endpoint every N seconds. Blank or 0 fetches each once at pane startup.">Snapshot refresh (sec)</label>
+      <input id="p-snapshot-refresh" type="number" step="1" min="0" onchange="updateCarouselSeconds('snapshot_refresh_seconds',this.value)">
+      <label title="Advance to the next stream every N seconds. Blank or 0 disables automatic cycling.">Auto-cycle (sec)</label>
+      <input id="p-cycle-seconds" type="number" step="1" min="0" onchange="updateCarouselSeconds('cycle_seconds',this.value)">
+      <label class="inline"><input type="checkbox" id="p-show-controls" onchange="updateCarouselBool('show_controls',this.checked)"> Show previous / next controls</label>
+      <label class="inline"><input type="checkbox" id="p-show-stream-name" onchange="updateCarouselBool('show_stream_name',this.checked)"> Show current camera name</label>
     </div>
     <div id="autorefresh-extra" style="display:none">
     <label title="Reload every N minutes (0 = off). Web panes reset the timer on interaction; rtsp streams hard reload on schedule.">Auto-refresh (min)</label>
@@ -1714,14 +1939,25 @@ function showProps() {{
   document.getElementById("p-url").value = p.url || p.path || p.cmd || "";
   document.getElementById("p-fit").value = p.fit || "fill";
   const isRtsp = (p.type === "rtsp" || p.type === "stream");
+  const isCarousel = (p.type === "rtsp_carousel");
   const isWeb = (p.type === "web" || p.type === "browser");
   const isClock = (p.type === "clock");
-  document.getElementById("url-row").style.display = isClock ? "none" : "block";
+  document.getElementById("url-row").style.display = (isClock || isCarousel) ? "none" : "block";
   const rtspEx = document.getElementById("rtsp-extra");
-  rtspEx.style.display = isRtsp ? "block" : "none";
+  rtspEx.style.display = (isRtsp || isCarousel) ? "block" : "none";
   document.getElementById("p-hwdec").value = p.hwdec || "";
   document.getElementById("p-rtsp-t").value = p.rtsp_transport || "";
   document.getElementById("p-audio").checked = !!p.audio;
+  const carouselEx = document.getElementById("carousel-extra");
+  carouselEx.style.display = isCarousel ? "block" : "none";
+  if (isCarousel) {{
+    if (!Array.isArray(p.streams)) p.streams = [];
+    renderCarouselStreams(p);
+    document.getElementById("p-snapshot-refresh").value = p.snapshot_refresh_seconds || "";
+    document.getElementById("p-cycle-seconds").value = p.cycle_seconds || "";
+    document.getElementById("p-show-controls").checked = !!p.show_controls;
+    document.getElementById("p-show-stream-name").checked = !!p.show_stream_name;
+  }}
   const arEx = document.getElementById("autorefresh-extra");
   arEx.style.display = (isWeb || isRtsp) ? "block" : "none";
   document.getElementById("p-autorefresh").value = p.auto_refresh || "";
@@ -1741,6 +1977,111 @@ function updateProp(key, val) {{
   if (selectedIdx < 0) return;
   layout[selectedIdx][key] = val;
   render();
+}}
+
+function updatePaneType(val) {{
+  if (selectedIdx < 0) return;
+  const p = layout[selectedIdx];
+  p.type = val;
+  if (val === "rtsp_carousel" && !Array.isArray(p.streams)) {{
+    p.streams = [{{name: "Camera 1", url: p.url || ""}}];
+    delete p.url;
+  }}
+  render();
+}}
+
+function renderCarouselStreams(p) {{
+  const container = document.getElementById("p-streams");
+  container.innerHTML = "";
+  (p.streams || []).forEach((stream, index) => {{
+    const row = document.createElement("div");
+    row.className = "stream-row";
+    const head = document.createElement("div");
+    head.className = "stream-row-head";
+    const title = document.createElement("span");
+    title.textContent = "Stream " + (index + 1);
+    const actions = document.createElement("div");
+    actions.className = "stream-row-actions";
+    [
+      ["\u2191", () => moveCarouselStream(index, -1), index === 0, ""],
+      ["\u2193", () => moveCarouselStream(index, 1), index === p.streams.length - 1, ""],
+      ["\u00d7", () => removeCarouselStream(index), false, "danger"],
+    ].forEach(spec => {{
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = spec[0];
+      button.disabled = spec[2];
+      button.className = spec[3];
+      button.onclick = spec[1];
+      actions.appendChild(button);
+    }});
+    head.appendChild(title);
+    head.appendChild(actions);
+    row.appendChild(head);
+
+    [["Camera name", "name"], ["RTSP URL", "url"], ["Snapshot URL (optional)", "snapshot_url"]].forEach(spec => {{
+      const label = document.createElement("label");
+      label.textContent = spec[0];
+      const input = document.createElement("input");
+      input.value = stream[spec[1]] || "";
+      input.oninput = () => updateCarouselStream(index, spec[1], input.value);
+      label.appendChild(input);
+      row.appendChild(label);
+    }});
+    container.appendChild(row);
+  }});
+}}
+
+function addCarouselStream() {{
+  if (selectedIdx < 0) return;
+  const p = layout[selectedIdx];
+  if (!Array.isArray(p.streams)) p.streams = [];
+  p.streams.push({{name: "Camera " + (p.streams.length + 1), url: ""}});
+  render();
+}}
+
+function removeCarouselStream(index) {{
+  if (selectedIdx < 0) return;
+  const streams = layout[selectedIdx].streams || [];
+  streams.splice(index, 1);
+  render();
+}}
+
+function moveCarouselStream(index, delta) {{
+  if (selectedIdx < 0) return;
+  const streams = layout[selectedIdx].streams || [];
+  const next = index + delta;
+  if (next < 0 || next >= streams.length) return;
+  [streams[index], streams[next]] = [streams[next], streams[index]];
+  render();
+}}
+
+function updateCarouselStream(index, key, value) {{
+  if (selectedIdx < 0) return;
+  const stream = (layout[selectedIdx].streams || [])[index];
+  if (!stream) return;
+  if (key === "snapshot_url" && !value) delete stream.snapshot_url;
+  else stream[key] = value;
+  syncJson();
+  persistScreens();
+}}
+
+function updateCarouselSeconds(key, value) {{
+  if (selectedIdx < 0) return;
+  const p = layout[selectedIdx];
+  const seconds = parseFloat(value);
+  if (!value || Number.isNaN(seconds) || seconds <= 0) delete p[key];
+  else p[key] = seconds;
+  syncJson();
+  persistScreens();
+}}
+
+function updateCarouselBool(key, checked) {{
+  if (selectedIdx < 0) return;
+  const p = layout[selectedIdx];
+  if (checked) p[key] = true; else delete p[key];
+  syncJson();
+  persistScreens();
 }}
 
 function updateUrlProp(val) {{
@@ -1987,11 +2328,16 @@ async function applyLayout() {{
   // Make sure the saved doc is up-to-date before asking server to play.
   if (persistTimer) {{ clearTimeout(persistTimer); persistTimer = null; }}
   try {{
-    await fetch("/screens", {{
+    const saveRes = await fetch("/screens", {{
       method: "POST",
       headers: {{"Content-Type": "application/json"}},
       body: JSON.stringify(screensDoc),
     }});
+    if (!saveRes.ok) {{
+      const saveData = await saveRes.json();
+      showResult(false, saveData.error || "Invalid screen configuration");
+      return;
+    }}
     const res = await fetch("/screens/play", {{
       method: "POST",
       headers: {{"Content-Type": "application/json"}},

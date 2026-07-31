@@ -144,6 +144,7 @@ curl -X POST http://pi:8686/clear
 | Type | Alias | What it does | Required fields |
 |------|-------|--------------|-----------------|
 | `rtsp` | `stream` | Plays a stream via `mpv` | `url` |
+| `rtsp_carousel` | — | Cycles through named RTSP streams with optional snapshots and on-screen controls | `streams` |
 | `web` | `browser` | Opens a URL in Chromium kiosk mode | `url` |
 | `image` | — | Shows an image via `feh` | `path` |
 | `command` | — | Runs any command that creates an X window | `cmd` |
@@ -155,6 +156,7 @@ Open `http://<pi-ip>:8686/` in a browser to use the visual editor:
 
 - **Screen preview** — drag panes to move them, drag corner handles to resize
 - **Sidebar** — click a pane to edit its properties (name, type, URL, fit mode)
+- **RTSP carousel editor** — add, remove, reorder, and configure named streams, snapshots, controls, and timing
 - **Apply Layout** — pushes the layout to the Pi and restarts all panes
 - **Raw JSON** — expand the collapsible section at the bottom for direct JSON editing
 
@@ -245,6 +247,55 @@ curl -X POST http://pi:8686/pane \
     "mpv_args": ["--framedrop=yes"]
   }'
 ```
+
+### RTSP carousel
+
+An `rtsp_carousel` pane keeps exactly one RTSP stream active. Switching first
+stops the current `mpv`, shows the next camera's cached snapshot (or black when
+no snapshot is cached), and starts the selected stream. The video replaces the
+snapshot only after playback begins.
+
+```bash
+curl -X POST http://pi:8686/pane \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "cameras",
+    "type": "rtsp_carousel",
+    "streams": [
+      {
+        "name": "Front Door",
+        "url": "rtsp://192.168.1.101/live",
+        "snapshot_url": "http://192.168.1.101/snapshot.jpg"
+      },
+      {
+        "name": "Back Yard",
+        "url": "rtsp://192.168.1.102/live",
+        "snapshot_url": "http://192.168.1.102/snapshot.jpg"
+      }
+    ],
+    "snapshot_refresh_seconds": 10,
+    "show_controls": true,
+    "show_stream_name": true,
+    "cycle_seconds": 30,
+    "fit": "cover",
+    "x": 0, "y": 0, "w": 1.0, "h": 1.0
+  }'
+```
+
+Carousel fields:
+
+| Field | Purpose | Default |
+|-------|---------|---------|
+| `streams` | Non-empty array of `{name, url, snapshot_url?}` objects. Names and RTSP URLs are required. | required |
+| `snapshot_refresh_seconds` | Refresh every configured snapshot endpoint at this panel-wide frequency. Omit or use `0` to fetch each once at pane startup. | `0` |
+| `cycle_seconds` | Automatically advance and wrap after this many seconds. Manual navigation resets the timer. | `0` (off) |
+| `show_controls` | Show always-visible previous/next buttons when at least two streams exist. | `false` |
+| `show_stream_name` | Show the current stream name at the top center. | `false` |
+
+The normal RTSP options (`fit`, `hwdec`, `rtsp_transport`, `audio`, and
+`mpv_args`) apply to every stream in the carousel. Snapshot downloads run in
+the background and never delay RTSP startup. Failed refreshes retain the last
+good cached image.
 
 ### RTSP speed and codecs (e.g. Intelbras DVR)
 

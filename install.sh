@@ -30,7 +30,8 @@ sudo apt-get install -y -qq \
     scrot \
     conky-std \
     fonts-dejavu \
-    python3
+    python3 \
+    python3-pil.imagetk
 
 # --- Clone repo ------------------------------------------------------------
 echo "[2/6] Cloning repo to ${INSTALL_DIR}…"
