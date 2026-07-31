@@ -255,6 +255,11 @@ stops the current `mpv`, shows the next camera's cached snapshot (or black when
 no snapshot is cached), and starts the selected stream. The video replaces the
 snapshot only after playback begins.
 
+A stream entry may omit `url` and provide only `snapshot_url`. Snapshot-only
+entries never launch `mpv`; they display the fetched image until the carousel
+advances. Without `snapshot_refresh_seconds`, each snapshot is fetched once at
+pane startup and is not refreshed again.
+
 ```bash
 curl -X POST http://pi:8686/pane \
   -H 'Content-Type: application/json' \
@@ -286,7 +291,7 @@ Carousel fields:
 
 | Field | Purpose | Default |
 |-------|---------|---------|
-| `streams` | Non-empty array of `{name, url, snapshot_url?}` objects. Names and RTSP URLs are required. | required |
+| `streams` | Non-empty array of `{name, url?, snapshot_url?}` objects. A name and at least one URL are required. | required |
 | `snapshot_refresh_seconds` | Refresh every configured snapshot endpoint at this panel-wide frequency. Omit or use `0` to fetch each once at pane startup. | `0` |
 | `cycle_seconds` | Automatically advance and wrap after this many seconds. Manual navigation resets the timer. | `0` (off) |
 | `show_controls` | Show always-visible previous/next buttons when at least two streams exist. | `false` |

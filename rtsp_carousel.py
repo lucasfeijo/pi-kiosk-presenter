@@ -40,11 +40,13 @@ class SnapshotCache:
         cache_dir: str,
         refresh_seconds: float = 0,
         opener: Callable = urllib.request.urlopen,
+        on_update: Optional[Callable[[int], None]] = None,
     ):
         self.streams = streams
         self.cache_dir = cache_dir
         self.refresh_seconds = max(0.0, float(refresh_seconds or 0))
         self.opener = opener
+        self.on_update = on_update
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
         os.makedirs(cache_dir, mode=0o700, exist_ok=True)
@@ -71,8 +73,9 @@ class SnapshotCache:
         for index, stream in enumerate(self.streams):
             if self.stop_event.is_set():
                 return
-            if stream.get("snapshot_url"):
-                self.fetch_one(index, stream["snapshot_url"])
+            snapshot_url = (stream.get("snapshot_url") or "").strip()
+            if snapshot_url:
+                self.fetch_one(index, snapshot_url)
 
     def fetch_one(self, index: int, url: str) -> bool:
         destination = self.path_for(index)
@@ -89,6 +92,11 @@ class SnapshotCache:
             with open(temporary, "wb") as f:
                 f.write(data)
             os.replace(temporary, destination)
+            if self.on_update:
+                try:
+                    self.on_update(index)
+                except Exception:
+                    log.exception("Snapshot %d update callback failed", index)
             log.debug("Snapshot %d refreshed from %s", index, url)
             return True
         except Exception as exc:
@@ -145,6 +153,7 @@ class CarouselController:
             self.streams,
             cache_dir,
             self.pane.get("snapshot_refresh_seconds", 0),
+            on_update=self._snapshot_updated,
         )
 
         x, y, width, height = [int(value) for value in config["geom"]]
@@ -242,6 +251,14 @@ class CarouselController:
             self._stop_mpv()
             if self.shutting_down or generation != self.generation:
                 return
+            if not (self.streams[index].get("url") or "").strip():
+                log.info(
+                    "Displaying snapshot-only stream %d/%d '%s'",
+                    index + 1,
+                    len(self.streams),
+                    self.streams[index]["name"],
+                )
+                return
             self._start_mpv(generation, index)
 
     def _start_mpv(self, generation: int, index: int):
@@ -251,9 +268,10 @@ class CarouselController:
         except OSError:
             pass
         stream = self.streams[index]
+        url = (stream.get("url") or "").strip()
         cmd = build_mpv_rtsp_command(
             self.pane,
-            stream["url"],
+            url,
             title="pi-display-carousel-video",
             wid=self.video_wid,
             ipc_path=ipc_path,
@@ -293,6 +311,16 @@ class CarouselController:
             daemon=True,
             name=f"carousel-mpv-{generation}",
         ).start()
+
+    def _snapshot_updated(self, index: int):
+        self._queue_ui(self._apply_snapshot_update, index)
+
+    def _apply_snapshot_update(self, index: int):
+        if self.shutting_down or index != self.current_index:
+            return
+        if not (self.streams[index].get("url") or "").strip():
+            self.video_visible = False
+            self._render_snapshot(raise_layer=True)
 
     def _watch_ipc(
         self,

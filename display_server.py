@@ -86,18 +86,24 @@ def validate_rtsp_carousel_pane(pane: dict):
     for index, stream in enumerate(streams):
         if not isinstance(stream, dict):
             raise ValueError(f"rtsp_carousel streams[{index}] must be an object")
-        for key in ("name", "url"):
-            value = stream.get(key)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(
-                    f"rtsp_carousel streams[{index}].{key} must be a non-empty string"
-                )
-        snapshot_url = stream.get("snapshot_url")
-        if snapshot_url is not None and (
-            not isinstance(snapshot_url, str) or not snapshot_url.strip()
-        ):
+        name = stream.get("name")
+        if not isinstance(name, str) or not name.strip():
             raise ValueError(
-                f"rtsp_carousel streams[{index}].snapshot_url must be a non-empty string"
+                f"rtsp_carousel streams[{index}].name must be a non-empty string"
+            )
+        url = stream.get("url")
+        if url is not None and not isinstance(url, str):
+            raise ValueError(
+                f"rtsp_carousel streams[{index}].url must be a string"
+            )
+        snapshot_url = stream.get("snapshot_url")
+        if snapshot_url is not None and not isinstance(snapshot_url, str):
+            raise ValueError(
+                f"rtsp_carousel streams[{index}].snapshot_url must be a string"
+            )
+        if not (url or "").strip() and not (snapshot_url or "").strip():
+            raise ValueError(
+                f"rtsp_carousel streams[{index}] must provide url or snapshot_url"
             )
         if "snapshot_refresh_seconds" in stream:
             raise ValueError(
@@ -1984,7 +1990,9 @@ function updatePaneType(val) {{
   const p = layout[selectedIdx];
   p.type = val;
   if (val === "rtsp_carousel" && !Array.isArray(p.streams)) {{
-    p.streams = [{{name: "Camera 1", url: p.url || ""}}];
+    const first = {{name: "Camera 1"}};
+    if (p.url) first.url = p.url;
+    p.streams = [first];
     delete p.url;
   }}
   render();
@@ -2019,7 +2027,7 @@ function renderCarouselStreams(p) {{
     head.appendChild(actions);
     row.appendChild(head);
 
-    [["Camera name", "name"], ["RTSP URL", "url"], ["Snapshot URL (optional)", "snapshot_url"]].forEach(spec => {{
+    [["Camera name", "name"], ["RTSP URL (optional)", "url"], ["Snapshot URL (required without RTSP)", "snapshot_url"]].forEach(spec => {{
       const label = document.createElement("label");
       label.textContent = spec[0];
       const input = document.createElement("input");
@@ -2036,7 +2044,7 @@ function addCarouselStream() {{
   if (selectedIdx < 0) return;
   const p = layout[selectedIdx];
   if (!Array.isArray(p.streams)) p.streams = [];
-  p.streams.push({{name: "Camera " + (p.streams.length + 1), url: ""}});
+  p.streams.push({{name: "Camera " + (p.streams.length + 1)}});
   render();
 }}
 
@@ -2060,7 +2068,7 @@ function updateCarouselStream(index, key, value) {{
   if (selectedIdx < 0) return;
   const stream = (layout[selectedIdx].streams || [])[index];
   if (!stream) return;
-  if (key === "snapshot_url" && !value) delete stream.snapshot_url;
+  if ((key === "url" || key === "snapshot_url") && !value) delete stream[key];
   else stream[key] = value;
   syncJson();
   persistScreens();

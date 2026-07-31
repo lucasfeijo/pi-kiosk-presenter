@@ -63,6 +63,18 @@ class CarouselValidationTests(unittest.TestCase):
             )
         )
 
+    def test_snapshot_only_stream_is_valid(self):
+        validate_rtsp_carousel_pane(
+            carousel_pane(
+                streams=[
+                    {
+                        "name": "Still Camera",
+                        "snapshot_url": "http://camera/snapshot.jpg",
+                    }
+                ]
+            )
+        )
+
     def test_requires_named_streams_and_urls(self):
         for streams in (
             [],
@@ -148,6 +160,52 @@ class SnapshotCacheTests(unittest.TestCase):
             self.assertFalse(cache.fetch_one(0, "http://front/snapshot.jpg"))
             with open(cache.path_for(0), "rb") as f:
                 self.assertEqual(f.read(), b"old")
+
+    def test_successful_fetch_notifies_snapshot_only_display(self):
+        updates = []
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = SnapshotCache(
+                [{"name": "Still", "snapshot_url": "http://camera/still.jpg"}],
+                tmp,
+                refresh_seconds=0,
+                opener=lambda *_args, **_kwargs: Response(b"image"),
+                on_update=updates.append,
+            )
+            cache._run()
+            self.assertEqual(updates, [0])
+
+
+class SnapshotOnlyControllerTests(unittest.TestCase):
+    def test_switch_does_not_launch_mpv_without_stream_url(self):
+        controller = object.__new__(CarouselController)
+        controller.switch_lock = mock.MagicMock()
+        controller._stop_mpv = mock.Mock()
+        controller._start_mpv = mock.Mock()
+        controller.shutting_down = False
+        controller.generation = 1
+        controller.streams = [
+            {"name": "Still", "snapshot_url": "http://camera/still.jpg"}
+        ]
+
+        controller._switch_worker(1, 0)
+
+        controller._stop_mpv.assert_called_once()
+        controller._start_mpv.assert_not_called()
+
+    def test_snapshot_refresh_updates_visible_snapshot_only_entry(self):
+        controller = object.__new__(CarouselController)
+        controller.shutting_down = False
+        controller.current_index = 0
+        controller.video_visible = True
+        controller.streams = [
+            {"name": "Still", "snapshot_url": "http://camera/still.jpg"}
+        ]
+        controller._render_snapshot = mock.Mock()
+
+        controller._apply_snapshot_update(0)
+
+        self.assertFalse(controller.video_visible)
+        controller._render_snapshot.assert_called_once_with(raise_layer=True)
 
 
 class ProcessCleanupTests(unittest.TestCase):
