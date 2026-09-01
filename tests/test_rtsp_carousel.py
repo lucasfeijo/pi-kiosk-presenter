@@ -21,6 +21,7 @@ from rtsp_carousel import (
     CarouselController,
     NAME_OVERLAY_PLACEMENTS,
     SnapshotCache,
+    configure_carousel_window,
     split_url_credentials,
     stream_playback_config,
     stream_name_position,
@@ -93,6 +94,12 @@ class CarouselValidationTests(unittest.TestCase):
                     validate_rtsp_carousel_pane(
                         carousel_pane(stream_name_font_size=value)
                     )
+
+    def test_hide_title_bar_must_be_boolean(self):
+        validate_rtsp_carousel_pane(carousel_pane(hide_title_bar=False))
+
+        with self.assertRaisesRegex(ValueError, "hide_title_bar must be a boolean"):
+            validate_rtsp_carousel_pane(carousel_pane(hide_title_bar="false"))
 
     def test_snapshot_only_stream_is_valid(self):
         validate_rtsp_carousel_pane(
@@ -357,6 +364,30 @@ class SnapshotOnlyControllerTests(unittest.TestCase):
 
         self.assertFalse(controller.video_visible)
         controller._render_snapshot.assert_called_once_with(raise_layer=True)
+
+
+class CarouselWindowTests(unittest.TestCase):
+    def test_host_window_is_borderless_by_default(self):
+        root = mock.Mock()
+
+        configure_carousel_window(
+            root, carousel_pane(name="facial"), (0, 900, 540, 1020)
+        )
+
+        root.title.assert_called_once_with("facial")
+        root.overrideredirect.assert_called_once_with(True)
+        root.geometry.assert_called_once_with("540x1020+0+900")
+
+    def test_host_window_can_keep_title_bar(self):
+        root = mock.Mock()
+
+        configure_carousel_window(
+            root,
+            carousel_pane(name="hall", hide_title_bar=False),
+            (540, 900, 540, 1020),
+        )
+
+        root.overrideredirect.assert_called_once_with(False)
 
 
 class ProcessCleanupTests(unittest.TestCase):

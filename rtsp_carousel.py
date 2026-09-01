@@ -196,6 +196,16 @@ class SnapshotCache:
             self.fetch_all()
 
 
+def configure_carousel_window(root, pane: dict, geom: tuple[int, int, int, int]):
+    """Configure the Tk host before it is mapped by the window manager."""
+    x, y, width, height = geom
+    root.title(pane.get("name", "rtsp_carousel"))
+    root.overrideredirect(pane.get("hide_title_bar", True))
+    root.configure(background="black")
+    root.geometry(f"{width}x{height}+{x}+{y}")
+    root.minsize(1, 1)
+
+
 class CarouselController:
     """Own the pane window, exactly one mpv child, overlays, and timers."""
 
@@ -238,10 +248,7 @@ class CarouselController:
 
         x, y, width, height = [int(value) for value in config["geom"]]
         self.root = tk.Tk()
-        self.root.title(self.pane.get("name", "rtsp_carousel"))
-        self.root.configure(background="black")
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
-        self.root.minsize(1, 1)
+        configure_carousel_window(self.root, self.pane, (x, y, width, height))
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
 
         self.video_host = tk.Frame(

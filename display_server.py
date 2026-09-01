@@ -176,7 +176,7 @@ def validate_rtsp_carousel_pane(pane: dict):
             "stream_name_position must be one of: "
             + ", ".join(STREAM_NAME_POSITIONS)
         )
-    for key in ("show_controls", "show_stream_name"):
+    for key in ("show_controls", "show_stream_name", "hide_title_bar"):
         if key in pane and not isinstance(pane[key], bool):
             raise ValueError(f"{key} must be a boolean")
     if "mpv_args" in pane and (
