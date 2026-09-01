@@ -765,7 +765,10 @@ class DisplayManager:
         """Lightweight clock pane backed by conky. ~5–15 MB RAM, 1 Hz updates."""
         x, y, w, h = geom
         name = pane.get("name", "clock")
-        fmt = pane.get("format", "%H:%M:%S")
+        # The editor uses a single-line input, so let users type ``\n`` where
+        # they want a line break instead of requiring an actual Return.
+        fmt = str(pane.get("format", "%H:%M:%S")).replace(r"\n", "\n")
+        line_count = fmt.count("\n") + 1
         color = pane.get("color", "white")
         font = pane.get("font", "DejaVu Sans Bold")
         # Default font size: ~45% of pane height in points (≈60% as pixels @ 96 DPI).
@@ -774,11 +777,11 @@ class DisplayManager:
         except (TypeError, ValueError):
             size = 0
         if size <= 0:
-            size = max(8, int(h * 0.45))
+            size = max(8, int(h * 0.45 / line_count))
         # Vertical centering. The font's full line height (ascent + descent)
         # is ~1.23 EM and 1 EM ≈ 1.333 px/pt at 96 DPI, so ~1.64 px per point.
         # Margins are forced to 0 below so the only offset is voffset itself.
-        text_h_px = int(size * 1.64)
+        text_h_px = int(size * 1.64 * line_count)
         voff = max(0, (h - text_h_px) // 2)
 
         cfg_path = f"/tmp/pi-display-clock-{name}.conkyrc"
@@ -1722,8 +1725,8 @@ label.inline input{{width:auto}}
     <input id="p-autorefresh" type="number" step="1" min="0" onchange="updateAutoRefresh(this.value)">
     </div>
     <div id="clock-extra" style="display:none">
-    <label title="strftime-style format, e.g. %H:%M:%S or %a %d/%m %H:%M">Format</label>
-    <input id="p-format" oninput="updateProp('format',this.value)" placeholder="%H:%M:%S">
+    <label title="strftime-style format; type \\n for a line break, e.g. %a\\n%H:%M">Format</label>
+    <input id="p-format" oninput="updateProp('format',this.value)" placeholder="%H:%M:%S or %a\\n%H:%M">
     <label title="X color name or #rrggbb">Color</label>
     <input id="p-color" oninput="updateProp('color',this.value)" placeholder="white">
     <label title="Point size (blank = auto-size to pane height)">Font size (pt)</label>

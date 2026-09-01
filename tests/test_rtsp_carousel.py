@@ -419,6 +419,12 @@ class EditorHtmlTests(unittest.TestCase):
         ):
             self.assertIn(marker, html)
 
+    def test_clock_format_hint_documents_typed_line_breaks(self):
+        html = self._render_editor()
+
+        self.assertIn(r"type \n for a line break", html)
+        self.assertIn(r"%a\n%H:%M", html)
+
     def test_generated_editor_javascript_parses(self):
         node = shutil.which("node")
         if not node:
@@ -442,6 +448,26 @@ class EditorHtmlTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class ClockPaneTests(unittest.TestCase):
+    @mock.patch("display_server.subprocess.Popen")
+    @mock.patch("builtins.open", new_callable=mock.mock_open)
+    def test_typed_line_break_is_written_as_multiline_conky_format(
+        self, config_file, popen
+    ):
+        manager = object.__new__(DisplayManager)
+
+        manager._launch_clock(
+            {"name": "clock", "type": "clock", "format": r"%a\n%H:%M"},
+            (0, 0, 800, 400),
+        )
+
+        config = "".join(call.args[0] for call in config_file().write.call_args_list)
+        self.assertIn("${time %a\n%H:%M}", config)
+        self.assertNotIn(r"${time %a\n%H:%M}", config)
+        self.assertIn("font = [[DejaVu Sans Bold:size=90]]", config)
+        popen.assert_called_once()
 
 
 if __name__ == "__main__":

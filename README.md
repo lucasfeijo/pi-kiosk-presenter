@@ -150,6 +150,8 @@ curl -X POST http://pi:8686/clear
 | `command` | — | Runs any command that creates an X window | `cmd` |
 | `clock` | — | Lightweight strftime clock via `conky` | — (optional: `format`, `color`, `font`, `font_size`) |
 
+Clock formats accept a typed `\n` as a line break, for example `%a\n%H:%M`.
+
 ## Visual Layout Editor
 
 Open `http://<pi-ip>:8686/` in a browser to use the visual editor:
