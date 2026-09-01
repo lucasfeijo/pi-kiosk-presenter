@@ -316,6 +316,7 @@ def build_mpv_rtsp_command(
     if ipc_path:
         window_args.append(f"--input-ipc-server={ipc_path}")
 
+    border_arg = "--no-border" if pane.get("hide_title_bar", True) else "--border"
     cmd = [
         "mpv",
         f"--title={title}",
@@ -323,7 +324,7 @@ def build_mpv_rtsp_command(
         "--no-osc",
         "--no-input-default-bindings",
         "--force-window=yes",
-        "--no-border",
+        border_arg,
         "--no-keepaspect-window",
         f"--hwdec={hwdec}",
         *window_args,
@@ -431,7 +432,14 @@ def raise_window_stack(layout: list[dict], panes: dict[str, "ManagedPane"]):
             )
 
 
-def position_window(wid: int, x: int, y: int, w: int, h: int):
+def position_window(
+    wid: int,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    hide_title_bar: bool = True,
+):
     """Move and resize a window by its X window id."""
     # Remove any maximized / fullscreen state first so resize works
     subprocess.run(
@@ -452,16 +460,17 @@ def position_window(wid: int, x: int, y: int, w: int, h: int):
         ["xdotool", "windowsize", "--sync", str(wid), str(w), str(h)],
         check=True,
     )
-    # Remove window decorations via xprop (works with most WMs)
-    subprocess.run(
-        [
-            "xprop",
-            "-id", str(wid),
-            "-f", "_MOTIF_WM_HINTS", "32c",
-            "-set", "_MOTIF_WM_HINTS", "2, 0, 0, 0, 0",
-        ],
-        stderr=subprocess.DEVNULL,
-    )
+    if hide_title_bar:
+        # Remove window decorations via xprop (works with most WMs).
+        subprocess.run(
+            [
+                "xprop",
+                "-id", str(wid),
+                "-f", "_MOTIF_WM_HINTS", "32c",
+                "-set", "_MOTIF_WM_HINTS", "2, 0, 0, 0, 0",
+            ],
+            stderr=subprocess.DEVNULL,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -734,7 +743,8 @@ class DisplayManager:
         path = pane["path"]
         x, y, w, h = geom
         name = pane.get("name", "image")
-        cmd = ["feh", f"--title={name}", "--scale-down", "--auto-zoom", "--borderless",
+        border_args = ["--borderless"] if pane.get("hide_title_bar", True) else []
+        cmd = ["feh", f"--title={name}", "--scale-down", "--auto-zoom", *border_args,
                f"--geometry={w}x{h}+{x}+{y}", path]
         log.info("Launching feh: %s", " ".join(cmd))
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -771,6 +781,9 @@ class DisplayManager:
         line_count = fmt.count("\n") + 1
         color = pane.get("color", "white")
         font = pane.get("font", "DejaVu Sans Bold")
+        window_hints = "sticky,skip_taskbar,skip_pager,below"
+        if pane.get("hide_title_bar", True):
+            window_hints = "undecorated," + window_hints
         # Default font size: ~45% of pane height in points (≈60% as pixels @ 96 DPI).
         try:
             size = int(pane.get("font_size") or 0)
@@ -789,7 +802,7 @@ class DisplayManager:
             "conky.config = {\n"
             "  own_window = true,\n"
             "  own_window_type = 'normal',\n"
-            "  own_window_hints = 'undecorated,sticky,skip_taskbar,skip_pager,below',\n"
+            f"  own_window_hints = '{window_hints}',\n"
             f"  own_window_title = [[{name}]],\n"
             "  own_window_argb_visual = true,\n"
             "  own_window_argb_value = 0,\n"
@@ -889,9 +902,10 @@ class DisplayManager:
             wid = find_window_by_pid(proc.pid, retries=5, delay=0.5)
 
         if wid:
-            position_window(wid, x, y, w, h)
+            hide_title_bar = pane.get("hide_title_bar", True)
+            position_window(wid, x, y, w, h, hide_title_bar)
             time.sleep(0.3)
-            position_window(wid, x, y, w, h)
+            position_window(wid, x, y, w, h, hide_title_bar)
             subprocess.run(
                 ["xdotool", "set_window", "--name", name, str(wid)],
                 stderr=subprocess.DEVNULL,
@@ -1732,6 +1746,7 @@ label.inline input{{width:auto}}
     <label title="Point size (blank = auto-size to pane height)">Font size (pt)</label>
     <input id="p-font-size" type="number" step="1" min="6" onchange="updateClockSize(this.value)" placeholder="auto">
     </div>
+    <label class="inline" title="Remove the window manager title bar and borders"><input type="checkbox" id="p-hide-title-bar" onchange="updateHideTitleBar(this.checked)"> Hide window top bar</label>
     <label title="Higher value draws on top when panes overlap">Stack order</label>
     <input id="p-order" type="number" step="1" onchange="updateOrder(this.value)">
     <div class="coords">
@@ -2053,6 +2068,7 @@ function showProps() {{
   document.getElementById("p-format").value = p.format || "";
   document.getElementById("p-color").value = p.color || "";
   document.getElementById("p-font-size").value = p.font_size || "";
+  document.getElementById("p-hide-title-bar").checked = p.hide_title_bar !== false;
   document.getElementById("p-x").value = round(p.x || 0);
   document.getElementById("p-y").value = round(p.y || 0);
   document.getElementById("p-w").value = round(p.w || 1);
@@ -2300,6 +2316,15 @@ function updateClockSize(val) {{
   if (!val || Number.isNaN(n) || n <= 0) delete p.font_size;
   else p.font_size = n;
   syncJson();
+}}
+
+function updateHideTitleBar(checked) {{
+  if (selectedIdx < 0) return;
+  const p = layout[selectedIdx];
+  if (checked) delete p.hide_title_bar;
+  else p.hide_title_bar = false;
+  syncJson();
+  persistScreens();
 }}
 
 function updateCoord(key, val) {{

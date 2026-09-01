@@ -13,6 +13,7 @@ from display_server import (
     Handler,
     ManagedPane,
     build_mpv_rtsp_command,
+    position_window,
     validate_carousels_in_layout,
     validate_rtsp_carousel_pane,
 )
@@ -178,6 +179,21 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("--no-audio", cmd)
         self.assertIn("--framedrop=yes", cmd)
         self.assertEqual(cmd.count("rtsp://front/live"), 1)
+
+    def test_mpv_title_bar_is_hidden_by_default_and_can_be_shown(self):
+        default_cmd = build_mpv_rtsp_command(
+            {"fit": "fill"}, "rtsp://camera/live", title="camera"
+        )
+        visible_cmd = build_mpv_rtsp_command(
+            {"fit": "fill", "hide_title_bar": False},
+            "rtsp://camera/live",
+            title="camera",
+        )
+
+        self.assertIn("--no-border", default_cmd)
+        self.assertNotIn("--border", default_cmd)
+        self.assertIn("--border", visible_cmd)
+        self.assertNotIn("--no-border", visible_cmd)
 
     def test_stream_options_override_legacy_panel_defaults(self):
         pane = carousel_pane(fit="contain", hwdec="v4l2m2m-copy", audio=True)
@@ -383,6 +399,20 @@ class ProcessCleanupTests(unittest.TestCase):
         rmtree.assert_called_once_with("/tmp/carousel-runtime", ignore_errors=True)
 
 
+class WindowPositionTests(unittest.TestCase):
+    @mock.patch("display_server.time.sleep")
+    @mock.patch("display_server.subprocess.run")
+    def test_title_bar_is_hidden_by_default_and_can_be_kept(self, run, _sleep):
+        position_window(123, 10, 20, 800, 600)
+        default_commands = [call.args[0] for call in run.call_args_list]
+        self.assertTrue(any(command[0] == "xprop" for command in default_commands))
+
+        run.reset_mock()
+        position_window(123, 10, 20, 800, 600, hide_title_bar=False)
+        visible_commands = [call.args[0] for call in run.call_args_list]
+        self.assertFalse(any(command[0] == "xprop" for command in visible_commands))
+
+
 class EditorHtmlTests(unittest.TestCase):
     def _render_editor(self):
         fake_dm = mock.Mock()
@@ -424,6 +454,13 @@ class EditorHtmlTests(unittest.TestCase):
 
         self.assertIn(r"type \n for a line break", html)
         self.assertIn(r"%a\n%H:%M", html)
+
+    def test_hide_title_bar_control_defaults_to_checked(self):
+        html = self._render_editor()
+
+        self.assertIn('id="p-hide-title-bar"', html)
+        self.assertIn("p.hide_title_bar !== false", html)
+        self.assertIn("function updateHideTitleBar(checked)", html)
 
     def test_generated_editor_javascript_parses(self):
         node = shutil.which("node")
@@ -468,6 +505,22 @@ class ClockPaneTests(unittest.TestCase):
         self.assertNotIn(r"${time %a\n%H:%M}", config)
         self.assertIn("font = [[DejaVu Sans Bold:size=90]]", config)
         popen.assert_called_once()
+
+    @mock.patch("display_server.subprocess.Popen")
+    @mock.patch("builtins.open", new_callable=mock.mock_open)
+    def test_clock_can_keep_its_title_bar(self, config_file, _popen):
+        manager = object.__new__(DisplayManager)
+
+        manager._launch_clock(
+            {"name": "clock", "type": "clock", "hide_title_bar": False},
+            (0, 0, 800, 400),
+        )
+
+        config = "".join(call.args[0] for call in config_file().write.call_args_list)
+        self.assertIn(
+            "own_window_hints = 'sticky,skip_taskbar,skip_pager,below'", config
+        )
+        self.assertNotIn("undecorated", config)
 
 
 if __name__ == "__main__":

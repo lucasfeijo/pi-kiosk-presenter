@@ -152,6 +152,9 @@ curl -X POST http://pi:8686/clear
 
 Clock formats accept a typed `\n` as a line break, for example `%a\n%H:%M`.
 
+All pane types accept `hide_title_bar` (`true` by default). Set it to `false`
+to keep the window manager's title bar and borders visible.
+
 ## Visual Layout Editor
 
 Open `http://<pi-ip>:8686/` in a browser to use the visual editor:
