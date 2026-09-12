@@ -1602,6 +1602,8 @@ input:focus,select:focus{{outline:none;border-color:#58a6ff}}
   border:1px solid #30363d;border-radius:8px;padding:18px}}
 .stats-modal::backdrop{{background:rgba(1,4,9,.75)}}
 .stats-modal h2{{font-size:1rem}}
+#saved-designs-modal .card-header{{flex-wrap:wrap;gap:10px}}
+#saved-designs-modal .screens-strip{{flex-wrap:wrap;max-height:60vh;overflow:auto}}
 .stats-table-wrap{{overflow:auto;max-height:60vh}}
 @media(max-width:500px){{.props-grid,.stream-editor.property-section{{grid-template-columns:repeat(2,minmax(0,1fr))}}
   .property-section .property-field,.props-grid>.property-field:first-child{{grid-column:1 / -1}}
@@ -1651,6 +1653,7 @@ label.inline input{{width:auto}}
 <div class="titlebar">
   <h1>Pi Display Server</h1>
   <div class="topbar-tools">
+    <button class="stats-link" id="saved-designs-link" onclick="openSavedDesigns()" aria-haspopup="dialog">Saved Designs</button>
     <button class="stats-link" id="running-panes-link" onclick="openRunningPanes()" aria-haspopup="dialog">Running Panes</button>
     <div class="sys-bar" id="sys-stats"></div>
   </div>
@@ -1660,7 +1663,7 @@ label.inline input{{width:auto}}
   <div class="design-row">
     <div class="card design-card">
       <div class="card-header">
-        <h2>Screen Design <span class="now-playing-inline">Playing: <b id="now-playing">—</b></span></h2>
+        <h2>Current Design <span class="now-playing-inline">Playing: <b id="now-playing">—</b></span></h2>
         <div class="header-actions">
           <button class="btn-pill btn-neutral" onclick="refreshLiveView()" title="Capture the live display">&#x21bb; Live View</button>
           <button class="btn-pill btn-neutral" onclick="openJsonModal()" title="View / edit raw JSON">{{ }} JSON</button>
@@ -1668,7 +1671,7 @@ label.inline input{{width:auto}}
           <button class="btn-pill btn-danger" id="btn-delete-screen" onclick="deleteCurrentScreen()" title="Delete the screen currently being edited">Delete</button>
         </div>
       </div>
-      <div id="preview" aria-label="Screen design with current live view"></div>
+      <div id="preview" aria-label="Current design with live view"></div>
       <div id="live-shot-status" class="live-shot-status" role="status">Loading live view…</div>
       <div id="result"></div>
     </div>
@@ -1676,16 +1679,6 @@ label.inline input{{width:auto}}
 
 </div>
 <div class="sidebar">
-  <div class="card">
-    <div class="card-header">
-      <h2>Screens</h2>
-      <div class="header-actions">
-        <button class="icon-btn" title="Duplicate current screen" onclick="duplicateCurrentScreen()">&#x2398;</button>
-        <button class="icon-btn" title="New screen" onclick="newScreen()">+</button>
-      </div>
-    </div>
-    <div id="screens-strip" class="screens-strip"></div>
-  </div>
   <div class="card">
     <h2>Panes</h2>
     <div id="pane-list"></div>
@@ -1772,6 +1765,17 @@ label.inline input{{width:auto}}
   </div>
 </div>
 </div>
+<dialog id="saved-designs-modal" class="stats-modal" aria-labelledby="saved-designs-title" onclick="if(event.target===this)this.close()">
+  <div class="card-header">
+    <h2 id="saved-designs-title">Saved Designs</h2>
+    <div class="header-actions">
+      <button class="btn-pill btn-neutral" onclick="duplicateCurrentScreen();closeSavedDesigns()">Duplicate current</button>
+      <button class="btn-pill btn-neutral" onclick="newScreen();closeSavedDesigns()">+ New design</button>
+      <button class="btn-pill btn-neutral" onclick="closeSavedDesigns()" autofocus>Close</button>
+    </div>
+  </div>
+  <div id="screens-strip" class="screens-strip"></div>
+</dialog>
 <dialog id="running-panes-modal" class="stats-modal" aria-labelledby="running-panes-title" onclick="if(event.target===this)this.close()">
   <div class="card-header">
     <h2 id="running-panes-title">Running Panes</h2>
@@ -2061,6 +2065,7 @@ function selectScreenForEdit(i) {{
   layout = screensDoc.screens[i].panes;
   selectedIdx = -1;
   render();
+  closeSavedDesigns();
 }}
 
 function newScreen() {{
@@ -2593,6 +2598,15 @@ function loadFromJson() {{
     showResult(true, "Loaded from JSON");
     closeJsonModal();
   }} catch(e) {{ showResult(false, e.message); }}
+}}
+
+function openSavedDesigns() {{
+  renderScreens();
+  document.getElementById("saved-designs-modal").showModal();
+}}
+
+function closeSavedDesigns() {{
+  document.getElementById("saved-designs-modal").close();
 }}
 
 function openRunningPanes() {{
