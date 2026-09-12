@@ -1492,7 +1492,10 @@ class Handler(BaseHTTPRequestHandler):
 body{{font-family:-apple-system,system-ui,sans-serif;margin:0;padding:20px;background:#0d1117;color:#e6edf3}}
 h1{{font-size:1.3rem;margin:0;color:#58a6ff;line-height:1.6}}
 .titlebar{{display:flex;align-items:center;gap:16px;margin:0 0 16px}}
-.sys-bar{{margin-left:auto;display:flex;align-items:center;gap:14px;font-size:12px;color:#8b949e;
+.topbar-tools{{margin-left:auto;display:flex;align-items:center;justify-content:flex-end;gap:18px;flex-wrap:wrap}}
+.stats-link{{padding:0;background:none;color:#58a6ff;font-size:12px;white-space:nowrap}}
+.stats-link:hover{{text-decoration:underline}}
+.sys-bar{{display:flex;align-items:center;gap:14px;font-size:12px;color:#8b949e;
   white-space:nowrap;flex-wrap:wrap;justify-content:flex-end}}
 .sys-bar .item{{display:inline-flex;align-items:baseline;gap:5px}}
 .sys-bar .item .lbl{{color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:.3px}}
@@ -1502,8 +1505,8 @@ h1{{font-size:1.3rem;margin:0;color:#58a6ff;line-height:1.6}}
 .top{{display:flex;gap:16px;align-items:flex-start}}
 @media(max-width:900px){{.top{{flex-direction:column}}}}
 .preview-wrap{{flex:1;min-width:0}}
-.sidebar{{width:460px;flex-shrink:0}}
-@media(max-width:900px){{.sidebar{{width:100%}}}}
+.sidebar{{width:clamp(540px,56vw,1040px);flex-shrink:0;min-width:0}}
+@media(max-width:900px){{.sidebar,.preview-wrap{{width:100%}}}}
 .card-header{{display:flex;align-items:center;justify-content:space-between;margin:0 0 10px}}
 .card-header h2{{margin:0}}
 .icon-btn{{background:#30363d;color:#e6edf3;border:none;border-radius:6px;width:26px;height:26px;
@@ -1532,7 +1535,7 @@ h1{{font-size:1.3rem;margin:0;color:#58a6ff;line-height:1.6}}
 .header-actions{{display:flex;gap:8px}}
 .design-row{{display:flex;gap:16px;align-items:flex-start}}
 @media(max-width:700px){{.design-row{{flex-direction:column}}}}
-.design-card{{flex:1;min-width:0}}
+.design-card{{flex:1;min-width:0;width:100%}}
 .design-card .card-header{{flex-wrap:wrap;gap:10px}}
 .header-actions{{flex-wrap:wrap}}
 .live-shot-status{{margin-top:8px;color:#8b949e;font-size:12px;min-height:16px}}
@@ -1587,7 +1590,22 @@ label{{display:block;font-size:12px;color:#8b949e;margin:8px 0 3px}}
 input,select{{width:100%;padding:6px 8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;
   border-radius:4px;font-size:13px;font-family:inherit}}
 input:focus,select:focus{{outline:none;border-color:#58a6ff}}
-.coords{{display:grid;grid-template-columns:1fr 1fr;gap:6px}}
+.props-grid,.stream-editor.property-section{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px 14px;align-items:start}}
+.property-section{{display:contents}}
+.props-grid>*,.property-section>*{{min-width:0}}
+.property-section,.props-wide{{grid-column:1 / -1}}
+.property-field label{{margin-top:6px}}
+.props-grid>label.inline,.property-section>label.inline{{align-self:end;min-height:32px}}
+.coords{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;grid-column:1 / -1}}
+#p-streams{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;grid-column:1 / -1}}
+.stats-modal{{width:min(900px,calc(100vw - 40px));max-height:80vh;background:#161b22;color:#e6edf3;
+  border:1px solid #30363d;border-radius:8px;padding:18px}}
+.stats-modal::backdrop{{background:rgba(1,4,9,.75)}}
+.stats-modal h2{{font-size:1rem}}
+.stats-table-wrap{{overflow:auto;max-height:60vh}}
+@media(max-width:500px){{.props-grid,.stream-editor.property-section{{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  .property-section .property-field,.props-grid>.property-field:first-child{{grid-column:1 / -1}}
+  #p-streams{{grid-template-columns:minmax(0,1fr)}}}}
 .actions{{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}}
 button{{padding:7px 14px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer}}
 .btn-primary{{background:#238636;color:#fff}}.btn-primary:hover{{background:#2ea043}}
@@ -1632,7 +1650,10 @@ label.inline input{{width:auto}}
 </style></head><body>
 <div class="titlebar">
   <h1>Pi Display Server</h1>
-  <div class="sys-bar" id="sys-stats"></div>
+  <div class="topbar-tools">
+    <button class="stats-link" id="running-panes-link" onclick="openRunningPanes()" aria-haspopup="dialog">Running Panes</button>
+    <div class="sys-bar" id="sys-stats"></div>
+  </div>
 </div>
 <div class="top">
 <div class="preview-wrap">
@@ -1652,11 +1673,7 @@ label.inline input{{width:auto}}
       <div id="result"></div>
     </div>
   </div>
-  <div class="card">
-    <h2>Running Panes</h2>
-    <table><thead><tr><th>Name</th><th>Type</th><th>Status</th><th>PID</th><th>CPU</th><th>Mem</th></tr></thead>
-    <tbody id="proc-table"></tbody></table>
-  </div>
+
 </div>
 <div class="sidebar">
   <div class="card">
@@ -1676,83 +1693,95 @@ label.inline input{{width:auto}}
   </div>
   <div class="card" id="props-card" style="display:none">
     <h2>Properties</h2>
-    <label>Name</label><input id="p-name" oninput="updateProp('name',this.value)">
-    <label>Type</label>
+    <div class="props-grid">
+    <div class="property-field"><label>Name</label><input id="p-name" oninput="updateProp('name',this.value)"></div>
+    <div class="property-field"><label>Type</label>
     <select id="p-type" onchange="updatePaneType(this.value)">
       <option value="rtsp">rtsp</option><option value="rtsp_carousel">rtsp_carousel</option>
       <option value="web">web</option>
       <option value="image">image</option><option value="command">command</option>
       <option value="stats">stats</option><option value="clock">clock</option>
-    </select>
-    <div id="url-row">
-    <label>URL / Path</label><input id="p-url" oninput="updateUrlProp(this.value)">
-    </div>
+    </select></div>
     <div id="fit-row">
-    <label>Fit (rtsp)</label>
+    <div class="property-field"><label>Fit (rtsp)</label>
     <select id="p-fit" onchange="updateProp('fit',this.value)">
       <option value="fill">fill</option><option value="cover">cover</option><option value="contain">contain</option>
-    </select>
+    </select></div>
     </div>
-    <div id="rtsp-extra" style="display:none">
-    <label title="Pi: v4l2m2m-copy for H.264 subs; drm-copy for H.265 mains">hwdec</label>
+    <div id="url-row" class="props-wide">
+    <div class="property-field"><label>URL / Path</label><input id="p-url" oninput="updateUrlProp(this.value)"></div>
+    </div>
+    <div id="rtsp-extra" class="property-section" style="display:none">
+    <div class="property-field"><label title="Pi: v4l2m2m-copy for H.264 subs; drm-copy for H.265 mains">hwdec</label>
     <select id="p-hwdec" onchange="updateHwdec(this.value)">
       <option value="">(server default)</option>
       <option value="v4l2m2m-copy">v4l2m2m-copy (H.264)</option>
       <option value="drm-copy">drm-copy (H.265 / HEVC)</option>
       <option value="no">no (software)</option>
       <option value="auto">auto</option>
-    </select>
-    <label>RTSP transport</label>
+    </select></div>
+    <div class="property-field"><label>RTSP transport</label>
     <select id="p-rtsp-t" onchange="updateRtspTransport(this.value)">
       <option value="">(default)</option>
       <option value="tcp">tcp</option>
       <option value="udp">udp (faster LAN)</option>
-    </select>
+    </select></div>
     <label class="inline"><input type="checkbox" id="p-audio" onchange="updateAudio(this.checked)"> Decode audio</label>
     </div>
-    <div id="carousel-extra" class="stream-editor" style="display:none">
-      <label style="margin-top:0">Streams</label>
+    <div id="carousel-extra" class="stream-editor property-section" style="display:none">
+      <label class="props-wide" style="margin-top:0">Streams</label>
       <div id="p-streams"></div>
-      <button class="btn-secondary btn-sm" style="width:100%" onclick="addCarouselStream()">+ Add Stream</button>
-      <label title="Refresh every configured snapshot endpoint every N seconds. Blank or 0 fetches each once at pane startup.">Snapshot refresh (sec)</label>
-      <input id="p-snapshot-refresh" type="number" step="1" min="0" onchange="updateCarouselSeconds('snapshot_refresh_seconds',this.value)">
-      <label title="Advance to the next stream every N seconds. Blank or 0 disables automatic cycling.">Auto-cycle (sec)</label>
-      <input id="p-cycle-seconds" type="number" step="1" min="0" onchange="updateCarouselSeconds('cycle_seconds',this.value)">
+      <button class="btn-secondary btn-sm props-wide" style="width:100%" onclick="addCarouselStream()">+ Add Stream</button>
+      <div class="property-field"><label title="Refresh every configured snapshot endpoint every N seconds. Blank or 0 fetches each once at pane startup.">Snapshot refresh (sec)</label>
+      <input id="p-snapshot-refresh" type="number" step="1" min="0" onchange="updateCarouselSeconds('snapshot_refresh_seconds',this.value)"></div>
+      <div class="property-field"><label title="Advance to the next stream every N seconds. Blank or 0 disables automatic cycling.">Auto-cycle (sec)</label>
+      <input id="p-cycle-seconds" type="number" step="1" min="0" onchange="updateCarouselSeconds('cycle_seconds',this.value)"></div>
       <label class="inline"><input type="checkbox" id="p-show-controls" onchange="updateCarouselBool('show_controls',this.checked)"> Show previous / next controls</label>
-      <label>Camera name location</label>
+      <div class="property-field"><label>Camera name location</label>
       <select id="p-stream-name-position" onchange="updateCarouselOption('stream_name_position',this.value)">
         <option value="">hidden</option>
         <option value="top-left">top-left</option><option value="top">top</option><option value="top-right">top-right</option>
         <option value="left">left</option><option value="center">center</option><option value="right">right</option>
         <option value="bottom-left">bottom-left</option><option value="bottom">bottom</option><option value="bottom-right">bottom-right</option>
-      </select>
-      <label>Camera name font size (px)</label>
-      <input id="p-stream-name-font-size" type="number" step="1" min="1" placeholder="auto" onchange="updateCarouselPositiveNumber('stream_name_font_size',this.value)">
+      </select></div>
+      <div class="property-field"><label>Camera name font size (px)</label>
+      <input id="p-stream-name-font-size" type="number" step="1" min="1" placeholder="auto" onchange="updateCarouselPositiveNumber('stream_name_font_size',this.value)"></div>
     </div>
-    <div id="autorefresh-extra" style="display:none">
-    <label title="Reload every N minutes (0 = off). Web panes reset the timer on interaction; rtsp streams hard reload on schedule.">Auto-refresh (min)</label>
-    <input id="p-autorefresh" type="number" step="1" min="0" onchange="updateAutoRefresh(this.value)">
+    <div id="autorefresh-extra" class="property-section" style="display:none">
+    <div class="property-field"><label title="Reload every N minutes (0 = off). Web panes reset the timer on interaction; rtsp streams hard reload on schedule.">Auto-refresh (min)</label>
+    <input id="p-autorefresh" type="number" step="1" min="0" onchange="updateAutoRefresh(this.value)"></div>
     </div>
-    <div id="clock-extra" style="display:none">
-    <label title="strftime-style format; type \\n for a line break, e.g. %a\\n%H:%M">Format</label>
-    <input id="p-format" oninput="updateProp('format',this.value)" placeholder="%H:%M:%S or %a\\n%H:%M">
-    <label title="X color name or #rrggbb">Color</label>
-    <input id="p-color" oninput="updateProp('color',this.value)" placeholder="white">
-    <label title="Point size (blank = auto-size to pane height)">Font size (pt)</label>
-    <input id="p-font-size" type="number" step="1" min="6" onchange="updateClockSize(this.value)" placeholder="auto">
+    <div id="clock-extra" class="property-section" style="display:none">
+    <div class="property-field"><label title="strftime-style format; type \\n for a line break, e.g. %a\\n%H:%M">Format</label>
+    <input id="p-format" oninput="updateProp('format',this.value)" placeholder="%H:%M:%S or %a\\n%H:%M"></div>
+    <div class="property-field"><label title="X color name or #rrggbb">Color</label>
+    <input id="p-color" oninput="updateProp('color',this.value)" placeholder="white"></div>
+    <div class="property-field"><label title="Point size (blank = auto-size to pane height)">Font size (pt)</label>
+    <input id="p-font-size" type="number" step="1" min="6" onchange="updateClockSize(this.value)" placeholder="auto"></div>
     </div>
     <label class="inline" title="Remove the window manager title bar and borders"><input type="checkbox" id="p-hide-title-bar" onchange="updateHideTitleBar(this.checked)"> Hide window top bar</label>
-    <label title="Higher value draws on top when panes overlap">Stack order</label>
-    <input id="p-order" type="number" step="1" onchange="updateOrder(this.value)">
+    <div class="property-field"><label title="Higher value draws on top when panes overlap">Stack order</label>
+    <input id="p-order" type="number" step="1" onchange="updateOrder(this.value)"></div>
     <div class="coords">
-      <div><label>X</label><input id="p-x" type="number" step="0.01" min="0" max="1" onchange="updateCoord('x',this.value)"></div>
-      <div><label>Y</label><input id="p-y" type="number" step="0.01" min="0" max="1" onchange="updateCoord('y',this.value)"></div>
-      <div><label>W</label><input id="p-w" type="number" step="0.01" min="0.02" max="1" onchange="updateCoord('w',this.value)"></div>
-      <div><label>H</label><input id="p-h" type="number" step="0.01" min="0.02" max="1" onchange="updateCoord('h',this.value)"></div>
+      <div><div class="property-field"><label>X</label><input id="p-x" type="number" step="0.01" min="0" max="1" onchange="updateCoord('x',this.value)"></div></div>
+      <div><div class="property-field"><label>Y</label><input id="p-y" type="number" step="0.01" min="0" max="1" onchange="updateCoord('y',this.value)"></div></div>
+      <div><div class="property-field"><label>W</label><input id="p-w" type="number" step="0.01" min="0.02" max="1" onchange="updateCoord('w',this.value)"></div></div>
+      <div><div class="property-field"><label>H</label><input id="p-h" type="number" step="0.01" min="0.02" max="1" onchange="updateCoord('h',this.value)"></div></div>
+    </div>
     </div>
   </div>
 </div>
 </div>
+<dialog id="running-panes-modal" class="stats-modal" aria-labelledby="running-panes-title" onclick="if(event.target===this)this.close()">
+  <div class="card-header">
+    <h2 id="running-panes-title">Running Panes</h2>
+    <button class="btn-pill btn-neutral" onclick="document.getElementById('running-panes-modal').close()" autofocus>Close</button>
+  </div>
+  <div class="stats-table-wrap">
+    <table><thead><tr><th>Name</th><th>Type</th><th>Status</th><th>PID</th><th>CPU</th><th>Mem</th></tr></thead>
+    <tbody id="proc-table"></tbody></table>
+  </div>
+</dialog>
 <div id="json-modal" class="modal" onclick="if(event.target===this)closeJsonModal()">
   <div class="modal-card">
     <div class="card-header">
@@ -2159,12 +2188,12 @@ function showProps() {{
   document.getElementById("url-row").style.display = (isClock || isCarousel) ? "none" : "block";
   document.getElementById("fit-row").style.display = isCarousel ? "none" : "block";
   const rtspEx = document.getElementById("rtsp-extra");
-  rtspEx.style.display = isRtsp ? "block" : "none";
+  rtspEx.style.display = isRtsp ? "" : "none";
   document.getElementById("p-hwdec").value = p.hwdec || "";
   document.getElementById("p-rtsp-t").value = p.rtsp_transport || "";
   document.getElementById("p-audio").checked = !!p.audio;
   const carouselEx = document.getElementById("carousel-extra");
-  carouselEx.style.display = isCarousel ? "block" : "none";
+  carouselEx.style.display = isCarousel ? "" : "none";
   if (isCarousel) {{
     if (!Array.isArray(p.streams)) p.streams = [];
     migrateCarouselStreamOptions(p);
@@ -2178,10 +2207,10 @@ function showProps() {{
     document.getElementById("p-stream-name-font-size").value = p.stream_name_font_size || "";
   }}
   const arEx = document.getElementById("autorefresh-extra");
-  arEx.style.display = (isWeb || isRtsp) ? "block" : "none";
+  arEx.style.display = (isWeb || isRtsp) ? "" : "none";
   document.getElementById("p-autorefresh").value = p.auto_refresh || "";
   const clkEx = document.getElementById("clock-extra");
-  clkEx.style.display = isClock ? "block" : "none";
+  clkEx.style.display = isClock ? "" : "none";
   document.getElementById("p-format").value = p.format || "";
   document.getElementById("p-color").value = p.color || "";
   document.getElementById("p-font-size").value = p.font_size || "";
@@ -2564,6 +2593,12 @@ function loadFromJson() {{
     showResult(true, "Loaded from JSON");
     closeJsonModal();
   }} catch(e) {{ showResult(false, e.message); }}
+}}
+
+function openRunningPanes() {{
+  renderProcTable();
+  document.getElementById("running-panes-modal").showModal();
+  refreshStatus();
 }}
 
 function openJsonModal() {{

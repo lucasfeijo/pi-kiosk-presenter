@@ -161,7 +161,8 @@ Open `http://<pi-ip>:8686/` in a browser to use the visual editor:
 
 - **Screen preview** — drag panes to move them, drag corner handles to resize. The design overlays a fresh live capture only when it matches the applied layout.
 - **Automatic live view** — panel edits immediately hide the capture. Applying, restarting, clearing, or detecting display changes fetches a new capture after the panel windows are ready. Captures refresh every two minutes while visible and when returning to the tab; drafts that differ from the display stay in design-only mode. The Live View button also refreshes manually.
-- **Sidebar** — click a pane to edit its properties (name, type, URL, fit mode)
+- **Sidebar** — click a pane to edit its properties in a wider, three-column layout. Carousel streams appear side by side when space allows.
+- **Running Panes** — click the link before the CPU stats in the top bar to open process statistics in a modal; close it with Close, Escape, or a click outside.
 - **RTSP carousel editor** — add, remove, reorder, and configure named streams, snapshots, controls, and timing
 - **Apply Layout** — pushes the layout to the Pi and restarts all panes
 - **Raw JSON** — expand the collapsible section at the bottom for direct JSON editing
