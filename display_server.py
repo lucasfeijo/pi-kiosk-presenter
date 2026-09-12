@@ -931,10 +931,12 @@ class DisplayManager:
         with self.lock:
             # Update stored layout: replace existing pane with same name or append
             name = pane.get("name", pane.get("type", ""))
-            self._current_layout = [
-                p for p in self._current_layout if p.get("name") != name
-            ]
-            self._current_layout.append(pane)
+            for index, current in enumerate(self._current_layout):
+                if current.get("name", current.get("type", "")) == name:
+                    self._current_layout[index] = pane
+                    break
+            else:
+                self._current_layout.append(pane)
             self._add_pane(pane)
             self._save_layout()
 
@@ -1049,6 +1051,8 @@ class DisplayManager:
             return {
                 "screen": {"width": self.screen_w, "height": self.screen_h},
                 "system": self._system_stats(),
+                # Saved screens may contain drafts; expose the actual applied layout.
+                "layout": json.loads(json.dumps(self._current_layout)),
                 "panes": {
                     name: {
                         "type": mp.ptype,
@@ -1528,14 +1532,13 @@ h1{{font-size:1.3rem;margin:0;color:#58a6ff;line-height:1.6}}
 .header-actions{{display:flex;gap:8px}}
 .design-row{{display:flex;gap:16px;align-items:flex-start}}
 @media(max-width:700px){{.design-row{{flex-direction:column}}}}
-.live-view-card{{flex:0 0 auto}}
 .design-card{{flex:1;min-width:0}}
-.live-shot-wrap{{position:relative;background:#010409;border:1px solid #30363d;border-radius:6px;
-  overflow:hidden;display:flex;align-items:center;justify-content:center}}
-#live-shot{{display:block;height:100%;width:auto;max-width:100%}}
-.live-shot-status{{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
-  padding:12px;text-align:center;color:#8b949e;font-size:12px;background:rgba(13,17,23,.6)}}
-.live-shot-status.show{{display:flex}}
+.design-card .card-header{{flex-wrap:wrap;gap:10px}}
+.header-actions{{flex-wrap:wrap}}
+.live-shot-status{{margin-top:8px;color:#8b949e;font-size:12px;min-height:16px}}
+#preview{{background-size:100% 100%;background-repeat:no-repeat}}
+#preview.live-current .pane-rect{{background:transparent}}
+#preview.live-current .pane-rect.selected{{background:rgba(240,136,62,.08)}}
 .now-playing-inline{{margin-left:10px;color:#8b949e;font-size:11px;
   text-transform:none;letter-spacing:normal;font-weight:400}}
 .now-playing-inline b{{color:#e6edf3;font-weight:600}}
@@ -1555,7 +1558,7 @@ h1{{font-size:1.3rem;margin:0;color:#58a6ff;line-height:1.6}}
   text-transform:uppercase}}
 .card{{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;margin-bottom:16px}}
 .card h2{{font-size:.85rem;margin:0 0 10px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}}
-#preview{{position:relative;background:#010409;border:1px solid #30363d;border-radius:6px;overflow:hidden;cursor:default}}
+#preview{{position:relative;background-color:#010409;border:1px solid #30363d;border-radius:6px;overflow:hidden;cursor:default}}
 .pane-rect{{position:absolute;border:2px solid #58a6ff;border-radius:3px;cursor:move;
   display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;
   color:#e6edf3;text-shadow:0 1px 2px #000;user-select:none;background:rgba(88,166,255,.08)}}
@@ -1634,26 +1637,18 @@ label.inline input{{width:auto}}
 <div class="top">
 <div class="preview-wrap">
   <div class="design-row">
-    <div class="card live-view-card">
-      <div class="card-header">
-        <h2>Live View <span class="now-playing-inline">Playing: <b id="now-playing">—</b></span></h2>
-        <button class="btn-pill btn-neutral" onclick="refreshLiveView()" title="Reload screenshot">&#x21bb; Refresh</button>
-      </div>
-      <div class="live-shot-wrap">
-        <img id="live-shot" alt="Live screen" onload="onLiveShotLoad()" onerror="onLiveShotError()">
-        <div id="live-shot-status" class="live-shot-status">Loading…</div>
-      </div>
-    </div>
     <div class="card design-card">
       <div class="card-header">
-        <h2>Screen Design</h2>
+        <h2>Screen Design <span class="now-playing-inline">Playing: <b id="now-playing">—</b></span></h2>
         <div class="header-actions">
+          <button class="btn-pill btn-neutral" onclick="refreshLiveView()" title="Capture the live display">&#x21bb; Live View</button>
           <button class="btn-pill btn-neutral" onclick="openJsonModal()" title="View / edit raw JSON">{{ }} JSON</button>
           <button class="btn-pill btn-play" onclick="applyLayout()" title="Apply this screen to the display">&#9654; Apply</button>
           <button class="btn-pill btn-danger" id="btn-delete-screen" onclick="deleteCurrentScreen()" title="Delete the screen currently being edited">Delete</button>
         </div>
       </div>
-      <div id="preview"></div>
+      <div id="preview" aria-label="Screen design with current live view"></div>
+      <div id="live-shot-status" class="live-shot-status" role="status">Loading live view…</div>
       <div id="result"></div>
     </div>
   </div>
@@ -1795,44 +1790,164 @@ function persistScreens() {{
 
 const preview = document.getElementById("preview");
 
+// A capture is usable only for the same draft and applied display state.
+const LIVE_MAX_AGE = 2 * 60 * 1000;
+let liveGeneration = 0;
+let liveController = null;
+let liveTimer = null;
+let liveURL = null;
+let liveCapturedAt = 0;
+let displayChangesPending = 0;
+let pendingPropertyInput = null;
+let displaySettleUntil = 0;
+let observedDesign = designKey();
+let observedDisplay = displayKey(statusData);
+
+function stableKey(value) {{
+  if (Array.isArray(value)) return "[" + value.map(stableKey).join(",") + "]";
+  if (value && typeof value === "object") {{
+    return "{{" + Object.keys(value).sort().map(k => JSON.stringify(k) + ":" + stableKey(value[k])).join(",") + "}}";
+  }}
+  return JSON.stringify(value);
+}}
+
+function designKey() {{
+  return stableKey({{index: editingIdx, panes: layout}});
+}}
+
+function displayKey(data) {{
+  const panes = {{}};
+  Object.entries(data.panes || {{}}).forEach(([name, p]) => {{
+    panes[name] = {{pid: p.pid, alive: p.alive, wid: p.wid}};
+  }});
+  return stableKey({{screen: data.screen, layout: data.layout, panes}});
+}}
+
 function initPreview() {{
-  const row = document.querySelector(".design-row");
-  const wrap = document.querySelector(".live-shot-wrap");
-  const gap = 16;
-  const rowW = row.clientWidth;
+  const availableW = document.querySelector(".design-card").clientWidth - 28;
   const aspect = SCREEN_W / SCREEN_H;
-  const maxH = window.innerHeight - preview.getBoundingClientRect().top - 80;
-  // Two equal-aspect boxes (preview + live view) must fit side-by-side in the row,
-  // so the shared height is bounded by the available width divided by 2*aspect,
-  // and by the viewport height.
-  const hByWidth = (rowW - gap) / (2 * aspect);
-  const h = Math.max(120, Math.min(maxH > 0 ? maxH : hByWidth, hByWidth));
-  const w = h * aspect;
-  preview.style.width = Math.round(w) + "px";
-  preview.style.height = Math.round(h) + "px";
-  preview.dataset.scale = h / SCREEN_H;
-  if (wrap) {{
-    wrap.style.width = Math.round(w) + "px";
-    wrap.style.height = Math.round(h) + "px";
+  const maxH = Math.max(120, window.innerHeight - preview.getBoundingClientRect().top - 110);
+  const w = Math.min(availableW, maxH * aspect);
+  preview.style.width = w + "px";
+  preview.style.height = (w / aspect) + "px";
+  preview.dataset.scale = w / SCREEN_W;
+}}
+
+function invalidateLiveView(message = "Design changed — refreshing live view…") {{
+  liveGeneration++;
+  if (liveController) liveController.abort();
+  liveController = null;
+  clearTimeout(liveTimer);
+  liveTimer = null;
+  liveCapturedAt = 0;
+  preview.style.backgroundImage = "none";
+  preview.classList.remove("live-current");
+  if (liveURL) URL.revokeObjectURL(liveURL);
+  liveURL = null;
+  document.getElementById("live-shot-status").textContent = message;
+}}
+
+function scheduleLiveView(delay = 750) {{
+  clearTimeout(liveTimer);
+  liveTimer = setTimeout(() => {{ liveTimer = null; refreshLiveView(); }}, delay);
+}}
+
+function checkDesignChange() {{
+  const key = designKey();
+  if (key === observedDesign) return;
+  observedDesign = key;
+  invalidateLiveView();
+  scheduleLiveView();
+}}
+
+function beginDisplayChange() {{
+  displayChangesPending++;
+  invalidateLiveView("Updating display…");
+}}
+
+function endDisplayChange() {{
+  displayChangesPending--;
+  // Give newly launched windows time to paint before capturing them.
+  displaySettleUntil = Date.now() + 2000;
+  scheduleLiveView(2000);
+}}
+
+async function readLiveStatus(signal) {{
+  const res = await fetch("/status", {{cache: "no-store", signal}});
+  if (!res.ok) throw new Error("Display status unavailable");
+  return res.json();
+}}
+
+async function refreshLiveView() {{
+  if (document.hidden || displayChangesPending || liveController || pendingPropertyInput) return;
+  if (Date.now() < displaySettleUntil) {{
+    scheduleLiveView(displaySettleUntil - Date.now());
+    return;
+  }}
+  invalidateLiveView("Loading live view…");
+  const generation = liveGeneration;
+  const draft = designKey();
+  const controller = new AbortController();
+  liveController = controller;
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  let url = null;
+  try {{
+    const before = await readLiveStatus(controller.signal);
+    const waiting = (before.layout || []).some(p => {{
+      const running = (before.panes || {{}})[p.name || p.type];
+      return !running || !running.alive || !running.wid;
+    }});
+    if (waiting) {{
+      if (generation !== liveGeneration) return;
+      document.getElementById("live-shot-status").textContent = "Waiting for panel windows — retrying live view shortly…";
+      scheduleLiveView(5000);
+      return;
+    }}
+    const res = await fetch("/screenshot.jpg?t=" + Date.now(), {{cache: "no-store", signal: controller.signal}});
+    if (!res.ok) throw new Error("Screenshot unavailable");
+    url = URL.createObjectURL(await res.blob());
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    const after = await readLiveStatus(controller.signal);
+    if (generation !== liveGeneration || draft !== designKey() || controller.signal.aborted) return;
+    if (displayKey(before) !== displayKey(after)) {{
+      invalidateLiveView("Display changed during capture — refreshing…");
+      scheduleLiveView(2000);
+      return;
+    }}
+    statusData = after;
+    observedDisplay = displayKey(after);
+    renderProcTable();
+    renderSystemStats();
+    liveCapturedAt = Date.now();
+    if (stableKey(layout) !== stableKey(after.layout)) {{
+      document.getElementById("live-shot-status").textContent = "Design differs from the live display — apply it to see the live overlay.";
+    }} else {{
+      liveURL = url;
+      url = null;
+      preview.style.backgroundImage = 'url("' + liveURL + '")';
+      preview.classList.add("live-current");
+      document.getElementById("live-shot-status").textContent = "Live view captured just now · Design overlaid";
+    }}
+    scheduleLiveView(LIVE_MAX_AGE);
+  }} catch(e) {{
+    if (generation !== liveGeneration) return;
+    invalidateLiveView("Live view unavailable — retrying shortly. You can still edit the design.");
+    scheduleLiveView(10000);
+  }} finally {{
+    clearTimeout(timeout);
+    if (url) URL.revokeObjectURL(url);
+    if (liveController === controller) liveController = null;
   }}
 }}
 
-function refreshLiveView() {{
-  const img = document.getElementById("live-shot");
-  const status = document.getElementById("live-shot-status");
-  status.textContent = "Loading…";
-  status.classList.add("show");
-  img.src = "/screenshot.jpg?t=" + Date.now();
-}}
-
-function onLiveShotLoad() {{
-  document.getElementById("live-shot-status").classList.remove("show");
-}}
-
-function onLiveShotError() {{
-  const status = document.getElementById("live-shot-status");
-  status.textContent = "Screenshot unavailable (is scrot installed?)";
-  status.classList.add("show");
+function resumeLiveView() {{
+  if (document.hidden) return;
+  if (!liveCapturedAt || Date.now() - liveCapturedAt >= LIVE_MAX_AGE) {{
+    refreshLiveView();
+  }}
+  refreshStatus();
 }}
 
 function render() {{
@@ -1967,6 +2082,7 @@ function deleteCurrentScreen() {{
 }}
 
 async function playScreen(i) {{
+  beginDisplayChange();
   try {{
     const res = await fetch("/screens/play", {{
       method: "POST",
@@ -1982,6 +2098,7 @@ async function playScreen(i) {{
       setTimeout(refreshStatus, 2000);
     }} else showResult(false, data.error || "Error");
   }} catch(e) {{ showResult(false, e.message); }}
+  finally {{ endDisplayChange(); }}
 }}
 
 function renderList() {{
@@ -2415,6 +2532,7 @@ function deleteSelected() {{
 async function refreshSelected() {{
   if (selectedIdx < 0) return;
   const pane = layout[selectedIdx];
+  beginDisplayChange();
   try {{
     const res = await fetch("/pane", {{
       method: "POST",
@@ -2427,9 +2545,11 @@ async function refreshSelected() {{
       setTimeout(refreshStatus, 2000);
     }} else showResult(false, data.error || "Error");
   }} catch(e) {{ showResult(false, e.message); }}
+  finally {{ endDisplayChange(); }}
 }}
 
 function syncJson() {{
+  checkDesignChange();
   document.getElementById("raw-json").value = JSON.stringify(layout, null, 2);
 }}
 
@@ -2520,6 +2640,7 @@ function showResult(ok, msg) {{
 async function applyLayout() {{
   // Make sure the saved doc is up-to-date before asking server to play.
   if (persistTimer) {{ clearTimeout(persistTimer); persistTimer = null; }}
+  beginDisplayChange();
   try {{
     const saveRes = await fetch("/screens", {{
       method: "POST",
@@ -2545,26 +2666,40 @@ async function applyLayout() {{
       setTimeout(refreshStatus, 2000);
     }} else showResult(false, data.error || "Error");
   }} catch(e) {{ showResult(false, e.message); }}
+  finally {{ endDisplayChange(); }}
 }}
 
 async function clearAll() {{
   if (!confirm("Kill all panes?")) return;
-  const res = await fetch("/clear", {{ method: "POST" }});
-  if (res.ok) {{
+  beginDisplayChange();
+  try {{
+    const res = await fetch("/clear", {{ method: "POST" }});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not clear display");
+    statusData = data;
     layout.length = 0;
     selectedIdx = -1;
     render();
     showResult(true, "Cleared");
     setTimeout(refreshStatus, 500);
-  }}
+  }} catch(e) {{ showResult(false, e.message); }}
+  finally {{ endDisplayChange(); }}
 }}
 
 let prevCpuIdle = null, prevCpuTotal = null;
 
 async function refreshStatus() {{
   try {{
-    const res = await fetch("/status");
-    statusData = await res.json();
+    const generation = liveGeneration;
+    const data = await readLiveStatus();
+    if (generation !== liveGeneration || displayChangesPending) return;
+    const key = displayKey(data);
+    if (key !== observedDisplay) {{
+      observedDisplay = key;
+      invalidateLiveView("Display changed — refreshing live view…");
+      scheduleLiveView(2000);
+    }}
+    statusData = data;
     renderSystemStats();
     renderProcTable();
   }} catch(e) {{}}
@@ -2632,6 +2767,23 @@ function renderProcTable() {{
 
 window.addEventListener("resize", () => {{ initPreview(); render(); }});
 preview.addEventListener("mousedown", onPreviewMouseDown);
+document.addEventListener("visibilitychange", () => {{
+  if (document.hidden) {{
+    invalidateLiveView("Live view paused — refreshes when you return.");
+  }} else resumeLiveView();
+}});
+document.getElementById("props-card").addEventListener("input", e => {{
+  if (e.target.onchange && !e.target.oninput) {{
+    pendingPropertyInput = e.target;
+    invalidateLiveView("Design changed — finish editing to refresh live view.");
+  }}
+}});
+document.getElementById("props-card").addEventListener("change", () => {{
+  pendingPropertyInput = null;
+  scheduleLiveView();
+}});
+window.addEventListener("focus", resumeLiveView);
+window.addEventListener("pageshow", resumeLiveView);
 initPreview();
 render();
 renderProcTable();
