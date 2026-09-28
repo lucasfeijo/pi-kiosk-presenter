@@ -432,16 +432,18 @@ class ProcessCleanupTests(unittest.TestCase):
 
 class WindowPositionTests(unittest.TestCase):
     @mock.patch("display_server.time.sleep")
+    @mock.patch("display_server.hide_x11_window_decorations")
     @mock.patch("display_server.subprocess.run")
-    def test_title_bar_is_hidden_by_default_and_can_be_kept(self, run, _sleep):
+    def test_title_bar_is_hidden_by_default_and_can_be_kept(self, run, hide, _sleep):
         position_window(123, 10, 20, 800, 600)
-        default_commands = [call.args[0] for call in run.call_args_list]
-        self.assertTrue(any(command[0] == "xprop" for command in default_commands))
+        hide.assert_called_once_with(123)
+        self.assertEqual(run.call_args_list[-1].args[0],
+                         ["xdotool", "windowmove", "--sync", "123", "10", "20"])
 
         run.reset_mock()
+        hide.reset_mock()
         position_window(123, 10, 20, 800, 600, hide_title_bar=False)
-        visible_commands = [call.args[0] for call in run.call_args_list]
-        self.assertFalse(any(command[0] == "xprop" for command in visible_commands))
+        hide.assert_not_called()
 
 
 class EditorHtmlTests(unittest.TestCase):

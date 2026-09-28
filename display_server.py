@@ -452,20 +452,15 @@ def _pane_stack_sort_key(pane: dict, index: int) -> tuple[int, int]:
     return (o, index)
 
 
-def lower_x11_windows(wids: list[int]):
-    """Lower override-redirect windows, which Openbox keeps over normal clients.
+_x11_lock = Lock()
 
-    The RTSP carousel uses borderless Tk root windows.  Raising a managed
-    GStreamer window cannot put it above those roots, even with the EWMH ABOVE
-    state.  XLowerWindow acts on the Tk roots directly.
-    """
-    if not wids:
-        return
-    try:
+
+def _run_x11(action):
+    """Run one Xlib operation while ignoring windows closed during the request."""
+    with _x11_lock:
         x11 = ctypes.CDLL("libX11.so.6")
         x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
         x11.XOpenDisplay.restype = ctypes.c_void_p
-        x11.XLowerWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
         x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
         x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
         x11.XSetErrorHandler.argtypes = [ctypes.c_void_p]
@@ -479,14 +474,48 @@ def lower_x11_windows(wids: list[int]):
             ctypes.cast(ignore_stale_window, ctypes.c_void_p)
         )
         try:
-            for wid in wids:
-                x11.XLowerWindow(display, wid)
+            action(x11, display)
             x11.XSync(display, False)
         finally:
             x11.XSetErrorHandler(previous_handler)
             x11.XCloseDisplay(display)
+
+
+def lower_x11_windows(wids: list[int]):
+    """Lower carousel Tk roots, which Openbox keeps over normal clients."""
+    if not wids:
+        return
+    try:
+        def lower(x11, display):
+            x11.XLowerWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            for wid in wids:
+                x11.XLowerWindow(display, wid)
+
+        _run_x11(lower)
     except (OSError, RuntimeError):
         log.exception("Could not lower carousel windows below AirPlay")
+
+
+def hide_x11_window_decorations(wid: int):
+    """Set correctly typed Motif hints; Openbox reacts to this while mapped."""
+    try:
+        def hide(x11, display):
+            x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+            x11.XInternAtom.restype = ctypes.c_ulong
+            x11.XChangeProperty.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong,
+                ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int,
+            ]
+            atom = x11.XInternAtom(display, b"_MOTIF_WM_HINTS", False)
+            hints = (ctypes.c_ulong * 5)(2, 0, 0, 0, 0)
+            x11.XChangeProperty(
+                display, wid, atom, atom, 32, 0,
+                ctypes.cast(hints, ctypes.c_void_p), 5,
+            )
+
+        _run_x11(hide)
+    except (OSError, RuntimeError):
+        log.exception("Could not hide decorations for X11 window %s", wid)
 
 
 def raise_window_stack(layout: list[dict], panes: dict[str, "ManagedPane"]):
@@ -552,15 +581,11 @@ def position_window(
         check=True,
     )
     if hide_title_bar:
-        # Remove window decorations via xprop (works with most WMs).
+        hide_x11_window_decorations(wid)
+        # Removing the frame changes the client's origin.  Reapply the region.
         subprocess.run(
-            [
-                "xprop",
-                "-id", str(wid),
-                "-f", "_MOTIF_WM_HINTS", "32c",
-                "-set", "_MOTIF_WM_HINTS", "2, 0, 0, 0, 0",
-            ],
-            stderr=subprocess.DEVNULL,
+            ["xdotool", "windowmove", "--sync", str(wid), str(x), str(y)],
+            check=True,
         )
 
 
