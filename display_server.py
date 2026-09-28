@@ -8,6 +8,7 @@ windows accordingly (mpv for RTSP/video, chromium for web, feh for images, etc.)
 Requires: Python 3.9+, xdotool, xdpyinfo, mpv, chromium, feh, Tk, Pillow
 """
 
+import ctypes
 import json
 import logging
 import os
@@ -451,10 +452,54 @@ def _pane_stack_sort_key(pane: dict, index: int) -> tuple[int, int]:
     return (o, index)
 
 
+def lower_x11_windows(wids: list[int]):
+    """Lower override-redirect windows, which Openbox keeps over normal clients.
+
+    The RTSP carousel uses borderless Tk root windows.  Raising a managed
+    GStreamer window cannot put it above those roots, even with the EWMH ABOVE
+    state.  XLowerWindow acts on the Tk roots directly.
+    """
+    if not wids:
+        return
+    try:
+        x11 = ctypes.CDLL("libX11.so.6")
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XLowerWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        x11.XSetErrorHandler.argtypes = [ctypes.c_void_p]
+        x11.XSetErrorHandler.restype = ctypes.c_void_p
+        display = x11.XOpenDisplay(None)
+        if not display:
+            raise RuntimeError("cannot open X display")
+        handler_type = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+        ignore_stale_window = handler_type(lambda _display, _event: 0)
+        previous_handler = x11.XSetErrorHandler(
+            ctypes.cast(ignore_stale_window, ctypes.c_void_p)
+        )
+        try:
+            for wid in wids:
+                x11.XLowerWindow(display, wid)
+            x11.XSync(display, False)
+        finally:
+            x11.XSetErrorHandler(previous_handler)
+            x11.XCloseDisplay(display)
+    except (OSError, RuntimeError):
+        log.exception("Could not lower carousel windows below AirPlay")
+
+
 def raise_window_stack(layout: list[dict], panes: dict[str, "ManagedPane"]):
     """Raise each mapped window in stack order (last raised ends on top)."""
     indexed = list(enumerate(layout))
     indexed.sort(key=lambda iv: _pane_stack_sort_key(iv[1], iv[0]))
+    airplay_key = next(
+        (_pane_stack_sort_key(pane, index) for index, pane in indexed
+         if pane.get("type") == AIRPLAY_TYPE
+         and (managed := panes.get(pane.get("name", AIRPLAY_TYPE)))
+         and managed.wid),
+        None,
+    )
     for _, pane in indexed:
         name = pane.get("name", pane.get("type", ""))
         mp = panes.get(name)
@@ -464,6 +509,18 @@ def raise_window_stack(layout: list[dict], panes: dict[str, "ManagedPane"]):
                 ["xdotool", "windowraise", str(wid)],
                 stderr=subprocess.DEVNULL,
             )
+    if airplay_key is not None:
+        # Tk's override-redirect carousel roots sit above Openbox-managed
+        # windows regardless of the normal raise order.  Lower only carousels
+        # configured beneath the active AirPlay pane.
+        lower_x11_windows([
+            managed.wid
+            for index, pane in reversed(indexed)
+            if pane.get("type") == RTSP_CAROUSEL_TYPE
+            and _pane_stack_sort_key(pane, index) < airplay_key
+            if (managed := panes.get(pane.get("name", RTSP_CAROUSEL_TYPE)))
+            and managed.wid
+        ])
 
 
 def position_window(
@@ -1004,8 +1061,7 @@ class DisplayManager:
                     if stop.is_set() or self.panes.get(name) is not mp:
                         return
                     mp.wid = wid
-                    if wid is not None:
-                        raise_window_stack(self._current_layout, self.panes)
+                    raise_window_stack(self._current_layout, self.panes)
                 last_wid = wid
                 log.info("AirPlay pane '%s' %s", name,
                          "casting" if wid is not None else "waiting for cast")

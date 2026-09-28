@@ -8,6 +8,7 @@ from display_server import (
     DisplayManager,
     ManagedPane,
     find_airplay_window,
+    raise_window_stack,
     validate_carousels_in_layout,
 )
 
@@ -73,8 +74,34 @@ class AirPlayTests(unittest.TestCase):
             manager._monitor_airplay_window(pane, "airplay", managed,
                                             (10, 20, 300, 200), stop)
         position.assert_called_once_with(42, 10, 20, 300, 200, True)
-        stack.assert_called_once()
+        self.assertEqual(stack.call_count, 2)  # show cast, then restore layout
         self.assertIsNone(managed.wid)
+
+    def test_cast_lowers_carousel_roots_below_managed_video(self):
+        layout = [
+            {"name": "back", "type": "rtsp_carousel", "order": 0},
+            {"name": "front", "type": "rtsp_carousel", "order": 1},
+            airplay_pane(order=100),
+            {"name": "overlay", "type": "rtsp_carousel", "order": 101},
+        ]
+        panes = {
+            name: ManagedPane(name=name, ptype=ptype, proc=mock.Mock(), wid=wid)
+            for name, ptype, wid in (
+                ("back", "rtsp_carousel", 11),
+                ("front", "rtsp_carousel", 22),
+                ("airplay", "airplay", 33),
+                ("overlay", "rtsp_carousel", 44),
+            )
+        }
+        with mock.patch("display_server.subprocess.run") as run, \
+             mock.patch("display_server.lower_x11_windows") as lower:
+            raise_window_stack(layout, panes)
+            lower.assert_called_once_with([22, 11])
+            self.assertEqual(run.call_args_list[-1].args[0],
+                             ["xdotool", "windowraise", "44"])
+            panes["airplay"].wid = None
+            raise_window_stack(layout, panes)
+            lower.assert_called_once()
 
     def test_window_lookup_ignores_similarly_named_windows(self):
         def output(command, **_kwargs):
