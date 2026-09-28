@@ -12,6 +12,9 @@ sudo git fetch --prune origin
 sudo git reset --hard origin/main
 sudo chown -R "$(whoami)" "${INSTALL_DIR}"
 
+source "${INSTALL_DIR}/airplay-deps.sh"
+install_airplay_dependencies
+
 if ! command -v xdpyinfo >/dev/null 2>&1; then
     echo "Missing dependency detected (xdpyinfo). Installing x11-utils…"
     sudo apt-get update -qq

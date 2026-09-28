@@ -57,6 +57,8 @@ INPUT_DEVICE_PATTERN = os.environ.get(
     "INPUT_DEVICE_PATTERN", r"(touch|stylus|mouse|tablet)"
 )
 RTSP_CAROUSEL_TYPE = "rtsp_carousel"
+AIRPLAY_TYPE = "airplay"
+AIRPLAY_POLL_SECONDS = 1.0
 RTSP_STREAM_FIELDS = ("fit", "hwdec", "rtsp_transport", "audio", "mpv_args")
 STREAM_NAME_POSITIONS = (
     "top-left",
@@ -187,9 +189,10 @@ def validate_rtsp_carousel_pane(pane: dict):
 
 
 def validate_carousels_in_layout(layout: list[dict]):
-    """Preflight every carousel before a layout can disturb live panes."""
+    """Preflight special panes before a layout can disturb live panes."""
     if not isinstance(layout, list):
         raise ValueError("layout must be an array")
+    airplay_count = 0
     for index, pane in enumerate(layout):
         if not isinstance(pane, dict):
             raise ValueError(f"pane[{index}] must be an object")
@@ -197,6 +200,14 @@ def validate_carousels_in_layout(layout: list[dict]):
             validate_rtsp_carousel_pane(pane)
         except ValueError as exc:
             raise ValueError(f"pane[{index}]: {exc}") from None
+        if pane.get("type") == AIRPLAY_TYPE:
+            airplay_count += 1
+            device_name = pane.get("device_name", "AirPlay Pi")
+            if (not isinstance(device_name, str) or not device_name.strip()
+                    or len(device_name) > 80 or any(ord(c) < 32 for c in device_name)):
+                raise ValueError(f"pane[{index}]: device_name must be 1–80 printable characters")
+    if airplay_count > 1:
+        raise ValueError("only one airplay pane is supported per screen")
 
 
 def _chromium_user_data_dir(pane: dict) -> str:
@@ -407,6 +418,29 @@ def find_window_by_name(name: str, retries: int = 30, delay: float = 0.5) -> Opt
     return None
 
 
+def find_airplay_window(server_name: str) -> Optional[int]:
+    """Find UxPlay's visible video window, which exists only while casting."""
+    try:
+        out = subprocess.check_output(
+            ["xdotool", "search", "--onlyvisible", "--name", "^" + re.escape(server_name)],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    for raw in reversed(out.splitlines()):
+        try:
+            wid = int(raw)
+            title = subprocess.check_output(
+                ["xdotool", "getwindowname", str(wid)],
+                text=True, stderr=subprocess.DEVNULL,
+            ).strip()
+        except (FileNotFoundError, ValueError, subprocess.CalledProcessError):
+            continue
+        if title == server_name or title.startswith(server_name + "@"):
+            return wid
+    return None
+
+
 def _pane_stack_sort_key(pane: dict, index: int) -> tuple[int, int]:
     """Sort key for stacking: lower (order, index) = further back; higher = on top."""
     raw = pane.get("order", pane.get("z"))
@@ -512,6 +546,7 @@ class ManagedPane:
     runtime_dir: Optional[str] = field(default=None, repr=False)
     _refresh_stop: Optional[Event] = field(default=None, repr=False)
     _refresh_thread: Optional[Thread] = field(default=None, repr=False)
+    _airplay_stop: Optional[Event] = field(default=None, repr=False)
 
 
 class DisplayManager:
@@ -757,6 +792,17 @@ class DisplayManager:
         log.info("Launching command: %s", " ".join(cmd))
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    def _launch_airplay(self, pane: dict, geom: tuple[int, int, int, int]) -> subprocess.Popen:
+        """Advertise an AirPlay receiver without showing a window until video arrives."""
+        device_name = pane.get("device_name", "AirPlay Pi").strip()
+        cmd = ["uxplay", "-n", device_name, "-nh", "-vs", "ximagesink"]
+        help_text = subprocess.run(
+            ["uxplay", "-h"], capture_output=True, text=True, check=False
+        )
+        if "-nofreeze" in help_text.stdout + help_text.stderr:
+            cmd.append("-nofreeze")
+        return subprocess.Popen(cmd)
+
     def _launch_stats(self, pane: dict, geom: tuple[int, int, int, int]) -> subprocess.Popen:
         """Launch a chromium window showing the built-in system stats page."""
         port = int(os.environ.get("DISPLAY_PORT", "8686"))
@@ -842,6 +888,7 @@ class DisplayManager:
         "browser": _launch_web,     # alias
         "image": _launch_image,
         "command": _launch_command,
+        AIRPLAY_TYPE: _launch_airplay,
         "stats": _launch_stats,
         "clock": _launch_clock,
     }
@@ -896,6 +943,17 @@ class DisplayManager:
 
     def _position_pane(self, pane: dict, name: str, proc: subprocess.Popen, geom: tuple):
         """Find and position a pane's window (runs in a background thread)."""
+        if pane.get("type") == AIRPLAY_TYPE:
+            mp = self.panes.get(name)
+            if mp and mp.proc is proc:
+                stop = Event()
+                mp._airplay_stop = stop
+                Thread(
+                    target=self._monitor_airplay_window,
+                    args=(pane, name, mp, geom, stop),
+                    daemon=True,
+                ).start()
+            return
         x, y, w, h = geom
         wid = find_window_by_name(name, retries=10, delay=0.5)
         if wid is None:
@@ -925,10 +983,41 @@ class DisplayManager:
         else:
             log.warning("Pane '%s': could not find X window (pid=%d)", name, proc.pid)
 
+    def _monitor_airplay_window(self, pane: dict, name: str, mp: ManagedPane,
+                                geom: tuple, stop: Event):
+        """Place each new cast window above the requested panes, then release it."""
+        device_name = pane.get("device_name", "AirPlay Pi").strip()
+        last_wid = None
+        last_position = 0.0
+        while not stop.is_set() and mp.proc.poll() is None:
+            wid = find_airplay_window(device_name)
+            if wid is not None and (wid != last_wid or time.monotonic() - last_position >= 5):
+                try:
+                    position_window(wid, *geom, pane.get("hide_title_bar", True))
+                    last_position = time.monotonic()
+                except (OSError, subprocess.CalledProcessError):
+                    log.exception("Could not position AirPlay pane '%s'", name)
+                    stop.wait(AIRPLAY_POLL_SECONDS)
+                    continue
+            if wid != last_wid:
+                with self.lock:
+                    if stop.is_set() or self.panes.get(name) is not mp:
+                        return
+                    mp.wid = wid
+                    if wid is not None:
+                        raise_window_stack(self._current_layout, self.panes)
+                last_wid = wid
+                log.info("AirPlay pane '%s' %s", name,
+                         "casting" if wid is not None else "waiting for cast")
+            stop.wait(AIRPLAY_POLL_SECONDS)
+
     def add_pane(self, pane: dict):
         """Add a single pane without disturbing existing ones."""
         validate_rtsp_carousel_pane(pane)
         with self.lock:
+            candidate = [p for p in self._current_layout
+                         if p.get("name", p.get("type", "")) != pane.get("name", pane.get("type", ""))]
+            validate_carousels_in_layout([*candidate, pane])
             # Update stored layout: replace existing pane with same name or append
             name = pane.get("name", pane.get("type", ""))
             for index, current in enumerate(self._current_layout):
@@ -1323,6 +1412,8 @@ class DisplayManager:
         mp = self.panes.pop(name, None)
         if not mp:
             return
+        if mp._airplay_stop:
+            mp._airplay_stop.set()
         self._stop_auto_refresh_mp(mp)
         if mp.process_group:
             log.info("Stopping pane group '%s' (pgid=%d)", name, mp.proc.pid)
@@ -1565,6 +1656,7 @@ h1{{font-size:1.3rem;margin:0;color:#58a6ff;line-height:1.6}}
 .pane-rect{{position:absolute;border:2px solid #58a6ff;border-radius:3px;cursor:move;
   display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;
   color:#e6edf3;text-shadow:0 1px 2px #000;user-select:none;background:rgba(88,166,255,.08)}}
+.pane-rect.airplay{{border-style:dashed;background:rgba(88,166,255,.04)}}
 .pane-rect.selected{{border-color:#f0883e;background:rgba(240,136,62,.12);z-index:10}}
 .pane-rect .handle{{position:absolute;width:10px;height:10px;background:#58a6ff;border-radius:2px;cursor:nwse-resize}}
 .pane-rect.selected .handle{{background:#f0883e}}
@@ -1694,6 +1786,7 @@ label.inline input{{width:auto}}
       <option value="web">web</option>
       <option value="image">image</option><option value="command">command</option>
       <option value="stats">stats</option><option value="clock">clock</option>
+      <option value="airplay">airplay</option>
     </select></div>
     <div id="fit-row">
     <div class="property-field"><label>Fit (rtsp)</label>
@@ -1720,6 +1813,11 @@ label.inline input{{width:auto}}
       <option value="udp">udp (faster LAN)</option>
     </select></div>
     <label class="inline"><input type="checkbox" id="p-audio" onchange="updateAudio(this.checked)"> Decode audio</label>
+    </div>
+    <div id="airplay-extra" class="property-section" style="display:none">
+      <div class="property-field"><label>AirPlay device name</label>
+      <input id="p-device-name" maxlength="80" oninput="updateProp('device_name',this.value)" placeholder="AirPlay Pi"></div>
+      <div class="props-wide" style="font-size:12px;color:#8b949e">This pane covers its region only while receiving video. Protected video from services such as Apple TV may not play.</div>
     </div>
     <div id="carousel-extra" class="stream-editor property-section" style="display:none">
       <label class="props-wide" style="margin-top:0">Streams</label>
@@ -1928,7 +2026,7 @@ async function refreshLiveView() {{
     const before = await readLiveStatus(controller.signal);
     const waiting = (before.layout || []).some(p => {{
       const running = (before.panes || {{}})[p.name || p.type];
-      return !running || !running.alive || !running.wid;
+      return !running || !running.alive || (p.type !== "airplay" && !running.wid);
     }});
     if (waiting) {{
       if (generation !== liveGeneration) return;
@@ -1988,7 +2086,7 @@ function render() {{
   preview.querySelectorAll(".pane-rect").forEach(e => e.remove());
   layout.forEach((p, i) => {{
     const el = document.createElement("div");
-    el.className = "pane-rect" + (i === selectedIdx ? " selected" : "");
+    el.className = "pane-rect" + (p.type === "airplay" ? " airplay" : "") + (i === selectedIdx ? " selected" : "");
     const x = (p.x || 0), y = (p.y || 0), w = (p.w || 1), h = (p.h || 1);
     el.style.left = (x * SCREEN_W * scale) + "px";
     el.style.top = (y * SCREEN_H * scale) + "px";
@@ -1996,7 +2094,7 @@ function render() {{
     el.style.height = (h * SCREEN_H * scale) + "px";
     const ord = (p.order != null && p.order !== "") ? Number(p.order) : 0;
     el.style.zIndex = String(ord * 1000 + i + 1);
-    el.textContent = p.name || p.type || "?";
+    el.textContent = p.type === "airplay" ? ((p.name || "AirPlay") + " · appears on cast") : (p.name || p.type || "?");
     el.dataset.idx = i;
     el.onmousedown = (e) => startDrag(e, i, "move");
     ["br","bl","tr","tl"].forEach(corner => {{
@@ -2036,7 +2134,7 @@ function renderScreens() {{
       m.style.height = (h * TH) + "px";
       const ord = (p.order != null && p.order !== "") ? Number(p.order) : 0;
       m.style.zIndex = String(ord * 1000 + 1);
-      m.textContent = p.name || p.type || "";
+      m.textContent = p.type === "airplay" ? "AirPlay" : (p.name || p.type || "");
       thumb.appendChild(m);
     }});
     if (i === playingIdx) {{
@@ -2190,8 +2288,11 @@ function showProps() {{
   const isCarousel = (p.type === "rtsp_carousel");
   const isWeb = (p.type === "web" || p.type === "browser");
   const isClock = (p.type === "clock");
-  document.getElementById("url-row").style.display = (isClock || isCarousel) ? "none" : "block";
-  document.getElementById("fit-row").style.display = isCarousel ? "none" : "block";
+  const isAirPlay = (p.type === "airplay");
+  document.getElementById("url-row").style.display = (isClock || isCarousel || isAirPlay) ? "none" : "block";
+  document.getElementById("fit-row").style.display = (isCarousel || isAirPlay) ? "none" : "block";
+  document.getElementById("airplay-extra").style.display = isAirPlay ? "" : "none";
+  document.getElementById("p-device-name").value = p.device_name || "AirPlay Pi";
   const rtspEx = document.getElementById("rtsp-extra");
   rtspEx.style.display = isRtsp ? "" : "none";
   document.getElementById("p-hwdec").value = p.hwdec || "";
@@ -2237,6 +2338,13 @@ function updatePaneType(val) {{
   if (selectedIdx < 0) return;
   const p = layout[selectedIdx];
   p.type = val;
+  if (val === "airplay") {{
+    delete p.url; delete p.path; delete p.cmd;
+    if (!p.device_name) p.device_name = "AirPlay Pi";
+    if (p.order == null) p.order = 100;
+  }} else {{
+    delete p.device_name;
+  }}
   if (val === "rtsp_carousel" && !Array.isArray(p.streams)) {{
     const first = {{name: "Camera 1"}};
     if (p.url) first.url = p.url;

@@ -43,6 +43,10 @@ else
     sudo git clone "${REPO_URL}" "${INSTALL_DIR}"
 fi
 
+# --- AirPlay receiver -------------------------------------------------------
+source "${INSTALL_DIR}/airplay-deps.sh"
+install_airplay_dependencies
+
 # --- Symlink update command ------------------------------------------------
 echo "[3/6] Installing update-display command…"
 sudo chmod +x "${INSTALL_DIR}/update.sh"

@@ -149,11 +149,48 @@ curl -X POST http://pi:8686/clear
 | `image` | — | Shows an image via `feh` | `path` |
 | `command` | — | Runs any command that creates an X window | `cmd` |
 | `clock` | — | Lightweight strftime clock via `conky` | — (optional: `format`, `color`, `font`, `font_size`) |
+| `airplay` | — | Receives AirPlay audio and screen mirroring via UxPlay; video window appears only during a cast | — (optional: `device_name`) |
 
 Clock formats accept a typed `\n` as a line break, for example `%a\n%H:%M`.
 
 All pane types accept `hide_title_bar` (`true` by default). Set it to `false`
 to keep the window manager's title bar and borders visible.
+
+### AirPlay overlay
+
+Add an `airplay` pane in the visual editor or API. It can overlap other panes;
+`order` controls stacking, so a larger value places it above them. The editor
+shows a dashed outline to make its region editable, but the actual Pi screen
+keeps showing the panes underneath until a video cast starts. Audio-only casts
+play through the Pi's configured sound output without creating a video window.
+Only one AirPlay pane is supported in each saved screen.
+
+```json
+{
+  "name": "airplay",
+  "type": "airplay",
+  "device_name": "AirPlay Pi",
+  "x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8,
+  "order": 100
+}
+```
+
+The installer and updater install UxPlay, Avahi, and the needed GStreamer
+plugins. The sender and Pi must be on the same LAN, with mDNS discovery
+(UDP 5353) working. From an iPhone or iPad, choose **Screen Mirroring** and
+select the configured device name. UxPlay's video window is positioned as soon
+as the cast begins and removed when it stops. Recent UxPlay versions also
+support `-nofreeze` to remove a stale window after an interrupted connection;
+older distribution versions may leave the last frame visible after network loss.
+
+This uses UxPlay's AirPlay mirroring and audio features. It does not decode
+FairPlay-protected video from apps such as Apple TV. Such content requires a
+compatible licensed receiver (for example, an Apple TV connected directly to
+the display). An HDMI capture input would not turn that protected stream into
+an ordinary Pi pane because protected HDMI playback uses HDCP.
+Recent UxPlay releases offer limited direct HLS playback for unprotected
+YouTube app streams; that mode needs a separate window-positioning check on the
+Pi before it can be enabled in this pane.
 
 ## Visual Layout Editor
 
