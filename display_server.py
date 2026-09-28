@@ -60,6 +60,7 @@ INPUT_DEVICE_PATTERN = os.environ.get(
 RTSP_CAROUSEL_TYPE = "rtsp_carousel"
 AIRPLAY_TYPE = "airplay"
 AIRPLAY_POLL_SECONDS = 1.0
+AIRPLAY_ORPHAN_GRACE_SECONDS = 8.0
 RTSP_STREAM_FIELDS = ("fit", "hwdec", "rtsp_transport", "audio", "mpv_args")
 STREAM_NAME_POSITIONS = (
     "top-left",
@@ -440,6 +441,43 @@ def find_airplay_window(server_name: str) -> Optional[int]:
         if title == server_name or title.startswith(server_name + "@"):
             return wid
     return None
+
+
+def airplay_has_tcp_client(pid: int) -> Optional[bool]:
+    """Return whether UxPlay owns an established TCP connection.
+
+    A stopped iPhone cast can leave GStreamer's last frame mapped even though
+    UxPlay has no active client.  Socket ownership avoids treating a paused,
+    static screen as disconnected.  None means the process state was unreadable.
+    """
+    try:
+        with os.scandir(f"/proc/{pid}/fd") as fds:
+            inodes = set()
+            for fd in fds:
+                try:
+                    target = os.readlink(fd.path)
+                except OSError:
+                    continue  # fd closed while enumerating
+                if target.startswith("socket:[") and target.endswith("]"):
+                    inodes.add(target[8:-1])
+    except OSError:
+        return None
+    if not inodes:
+        return False
+
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(table, encoding="ascii") as rows:
+                next(rows, None)
+                for row in rows:
+                    fields = row.split()
+                    if len(fields) > 9 and fields[3] == "01" and fields[9] in inodes:
+                        return True
+        except FileNotFoundError:
+            continue  # IPv6 may be disabled
+        except OSError:
+            return None
+    return False
 
 
 def _pane_stack_sort_key(pane: dict, index: int) -> tuple[int, int]:
@@ -1071,6 +1109,7 @@ class DisplayManager:
         device_name = pane.get("device_name", "AirPlay Pi").strip()
         last_wid = None
         last_position = 0.0
+        no_client_since = None
         while not stop.is_set() and mp.proc.poll() is None:
             wid = find_airplay_window(device_name)
             if wid is not None and (wid != last_wid or time.monotonic() - last_position >= 5):
@@ -1090,6 +1129,23 @@ class DisplayManager:
                 last_wid = wid
                 log.info("AirPlay pane '%s' %s", name,
                          "casting" if wid is not None else "waiting for cast")
+            if wid is not None:
+                connected = airplay_has_tcp_client(mp.proc.pid)
+                if connected is False:
+                    now = time.monotonic()
+                    if no_client_since is None:
+                        no_client_since = now
+                    elif now - no_client_since >= AIRPLAY_ORPHAN_GRACE_SECONDS:
+                        log.warning("AirPlay pane '%s': stale window with no client; restarting receiver", name)
+                        try:
+                            mp.proc.terminate()
+                        except ProcessLookupError:
+                            pass
+                        return  # watchdog relaunches the receiver
+                else:
+                    no_client_since = None
+            else:
+                no_client_since = None
             stop.wait(AIRPLAY_POLL_SECONDS)
 
     def add_pane(self, pane: dict):

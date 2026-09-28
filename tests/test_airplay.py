@@ -1,5 +1,6 @@
 """AirPlay pane validation and cast-window lifecycle coverage."""
 
+import io
 import threading
 import unittest
 from unittest import mock
@@ -7,6 +8,7 @@ from unittest import mock
 from display_server import (
     DisplayManager,
     ManagedPane,
+    airplay_has_tcp_client,
     find_airplay_window,
     raise_window_stack,
     validate_carousels_in_layout,
@@ -69,6 +71,7 @@ class AirPlayTests(unittest.TestCase):
         manager.panes = {"airplay": managed}
         stop = StepStop(3)
         with mock.patch("display_server.find_airplay_window", side_effect=[None, 42, None]), \
+             mock.patch("display_server.airplay_has_tcp_client", return_value=True), \
              mock.patch("display_server.position_window") as position, \
              mock.patch("display_server.raise_window_stack") as stack:
             manager._monitor_airplay_window(pane, "airplay", managed,
@@ -76,6 +79,36 @@ class AirPlayTests(unittest.TestCase):
         position.assert_called_once_with(42, 10, 20, 300, 200, True)
         self.assertEqual(stack.call_count, 2)  # show cast, then restore layout
         self.assertIsNone(managed.wid)
+
+    def test_orphaned_cast_window_restarts_receiver_after_grace(self):
+        manager = object.__new__(DisplayManager)
+        manager.lock = threading.RLock()
+        pane = airplay_pane(order=100)
+        manager._current_layout = [pane]
+        proc = mock.Mock(pid=123)
+        proc.poll.return_value = None
+        managed = ManagedPane(name="airplay", ptype="airplay", proc=proc)
+        manager.panes = {"airplay": managed}
+        with mock.patch("display_server.find_airplay_window", return_value=42), \
+             mock.patch("display_server.airplay_has_tcp_client", return_value=False), \
+             mock.patch("display_server.time.monotonic", side_effect=[0, 1, 9, 10, 11]), \
+             mock.patch("display_server.position_window"), \
+             mock.patch("display_server.raise_window_stack"):
+            manager._monitor_airplay_window(pane, "airplay", managed,
+                                            (0, 0, 300, 200), StepStop(3))
+        proc.terminate.assert_called_once_with()
+
+    def test_close_wait_is_not_an_active_airplay_client(self):
+        fake_fd = mock.Mock(path="/proc/123/fd/25")
+        rows = "header\n0: local remote {state} 0:0 0:0 0 0 0 42\n"
+        with mock.patch("display_server.os.scandir") as scandir, \
+             mock.patch("display_server.os.readlink", return_value="socket:[42]"), \
+             mock.patch("builtins.open") as opened:
+            scandir.return_value.__enter__.return_value = [fake_fd]
+            opened.side_effect = lambda _path, **_kwargs: io.StringIO(rows.format(state="01"))
+            self.assertTrue(airplay_has_tcp_client(123))
+            opened.side_effect = lambda _path, **_kwargs: io.StringIO(rows.format(state="08"))
+            self.assertFalse(airplay_has_tcp_client(123))
 
     def test_cast_lowers_carousel_roots_below_managed_video(self):
         layout = [

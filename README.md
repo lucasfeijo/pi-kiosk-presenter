@@ -179,9 +179,10 @@ The installer and updater install UxPlay, Avahi, and the needed GStreamer
 plugins. The sender and Pi must be on the same LAN, with mDNS discovery
 (UDP 5353) working. From an iPhone or iPad, choose **Screen Mirroring** and
 select the configured device name. UxPlay's video window is positioned as soon
-as the cast begins and removed when it stops. Recent UxPlay versions also
-support `-nofreeze` to remove a stale window after an interrupted connection;
-older distribution versions may leave the last frame visible after network loss.
+as the cast begins and removed when it stops. If UxPlay leaves a frozen frame
+after the sender disconnects, the server detects the missing TCP client and
+restarts only the AirPlay receiver after an eight-second grace period. The
+receiver watchdog then makes it available for another cast.
 
 This uses UxPlay's AirPlay mirroring and audio features. It does not decode
 FairPlay-protected video from apps such as Apple TV. Such content requires a
