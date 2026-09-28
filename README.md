@@ -183,6 +183,10 @@ as the cast begins and removed when it stops. If UxPlay leaves a frozen frame
 after the sender disconnects, the server detects the missing TCP client and
 restarts only the AirPlay receiver after an eight-second grace period. The
 receiver watchdog then makes it available for another cast.
+The video is centered and fitted inside the AirPlay pane at its native aspect
+ratio, including after the sender rotates. The pane size limits the video area;
+it does not stretch the image. Panes underneath remain visible in any unused
+space around the video.
 
 This uses UxPlay's AirPlay mirroring and audio features. It does not decode
 FairPlay-protected video from apps such as Apple TV. Such content requires a

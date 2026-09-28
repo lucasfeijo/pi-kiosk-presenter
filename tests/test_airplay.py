@@ -9,7 +9,9 @@ from display_server import (
     DisplayManager,
     ManagedPane,
     airplay_has_tcp_client,
+    fit_airplay_window,
     find_airplay_window,
+    get_window_size,
     raise_window_stack,
     validate_carousels_in_layout,
 )
@@ -57,8 +59,21 @@ class AirPlayTests(unittest.TestCase):
              mock.patch("display_server.subprocess.Popen") as popen:
             manager._launch_airplay(airplay_pane(), (0, 0, 100, 100))
         popen.assert_called_once_with(
-            ["uxplay", "-n", "AirPlay Pi", "-nh", "-vs", "ximagesink", "-nofreeze"]
+            ["uxplay", "-n", "AirPlay Pi", "-nh", "-vs",
+             "ximagesink force-aspect-ratio=true", "-nofreeze"]
         )
+
+    def test_video_fits_without_changing_portrait_or_landscape_ratio(self):
+        region = (10, 20, 300, 200)
+        self.assertEqual(fit_airplay_window(region, (1080, 1920)),
+                         (104, 20, 112, 200))
+        self.assertEqual(fit_airplay_window(region, (1920, 1080)),
+                         (10, 35, 300, 169))
+
+    def test_reads_native_x11_video_size(self):
+        with mock.patch("display_server.subprocess.check_output",
+                        return_value="WINDOW=42\nWIDTH=1170\nHEIGHT=2532\n"):
+            self.assertEqual(get_window_size(42), (1170, 2532))
 
     def test_cast_window_appears_over_layout_and_disappears_after_stop(self):
         manager = object.__new__(DisplayManager)
@@ -71,14 +86,37 @@ class AirPlayTests(unittest.TestCase):
         manager.panes = {"airplay": managed}
         stop = StepStop(3)
         with mock.patch("display_server.find_airplay_window", side_effect=[None, 42, None]), \
+             mock.patch("display_server.get_window_size", return_value=(1920, 1080)), \
              mock.patch("display_server.airplay_has_tcp_client", return_value=True), \
              mock.patch("display_server.position_window") as position, \
              mock.patch("display_server.raise_window_stack") as stack:
             manager._monitor_airplay_window(pane, "airplay", managed,
                                             (10, 20, 300, 200), stop)
-        position.assert_called_once_with(42, 10, 20, 300, 200, True)
+        position.assert_called_once_with(42, 10, 35, 300, 169, True)
         self.assertEqual(stack.call_count, 2)  # show cast, then restore layout
         self.assertIsNone(managed.wid)
+
+    def test_rotation_refits_video_without_requiring_new_window(self):
+        manager = object.__new__(DisplayManager)
+        manager.lock = threading.RLock()
+        pane = airplay_pane()
+        manager._current_layout = [pane]
+        proc = mock.Mock(pid=123)
+        proc.poll.return_value = None
+        managed = ManagedPane(name="airplay", ptype="airplay", proc=proc)
+        manager.panes = {"airplay": managed}
+        with mock.patch("display_server.find_airplay_window", return_value=42), \
+             mock.patch("display_server.get_window_size",
+                        side_effect=[(1080, 1920), (112, 200), (1920, 1080)]), \
+             mock.patch("display_server.airplay_has_tcp_client", return_value=True), \
+             mock.patch("display_server.position_window") as position, \
+             mock.patch("display_server.raise_window_stack"):
+            manager._monitor_airplay_window(pane, "airplay", managed,
+                                            (10, 20, 300, 200), StepStop(3))
+        self.assertEqual([call.args for call in position.call_args_list], [
+            (42, 104, 20, 112, 200, True),
+            (42, 10, 35, 300, 169, True),
+        ])
 
     def test_orphaned_cast_window_restarts_receiver_after_grace(self):
         manager = object.__new__(DisplayManager)

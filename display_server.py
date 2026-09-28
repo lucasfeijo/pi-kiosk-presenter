@@ -443,6 +443,40 @@ def find_airplay_window(server_name: str) -> Optional[int]:
     return None
 
 
+def get_window_size(wid: int) -> Optional[tuple[int, int]]:
+    """Read a video's own X11 size before fitting it into its pane."""
+    try:
+        out = subprocess.check_output(
+            ["xdotool", "getwindowgeometry", "--shell", str(wid)],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+        values = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+        width, height = int(values["WIDTH"]), int(values["HEIGHT"])
+        if width >= 64 and height >= 64:
+            return width, height
+    except (FileNotFoundError, KeyError, ValueError, subprocess.CalledProcessError):
+        pass
+    return None
+
+
+def fit_airplay_window(
+    region: tuple[int, int, int, int], source: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    """Center the video inside its pane without changing its width/height ratio."""
+    x, y, width, height = region
+    source_width, source_height = source
+    if width <= 0 or height <= 0 or source_width <= 0 or source_height <= 0:
+        return region
+    if width * source_height <= height * source_width:
+        video_width = width
+        video_height = max(1, min(height, round(width * source_height / source_width)))
+    else:
+        video_height = height
+        video_width = max(1, min(width, round(height * source_width / source_height)))
+    return (x + (width - video_width) // 2,
+            y + (height - video_height) // 2, video_width, video_height)
+
+
 def airplay_has_tcp_client(pid: int) -> Optional[bool]:
     """Return whether UxPlay owns an established TCP connection.
 
@@ -915,7 +949,8 @@ class DisplayManager:
     def _launch_airplay(self, pane: dict, geom: tuple[int, int, int, int]) -> subprocess.Popen:
         """Advertise an AirPlay receiver without showing a window until video arrives."""
         device_name = pane.get("device_name", "AirPlay Pi").strip()
-        cmd = ["uxplay", "-n", device_name, "-nh", "-vs", "ximagesink"]
+        cmd = ["uxplay", "-n", device_name, "-nh", "-vs",
+               "ximagesink force-aspect-ratio=true"]
         help_text = subprocess.run(
             ["uxplay", "-h"], capture_output=True, text=True, check=False
         )
@@ -1109,12 +1144,31 @@ class DisplayManager:
         device_name = pane.get("device_name", "AirPlay Pi").strip()
         last_wid = None
         last_position = 0.0
+        video_size = None
+        positioned_size = None
         no_client_since = None
         while not stop.is_set() and mp.proc.poll() is None:
             wid = find_airplay_window(device_name)
-            if wid is not None and (wid != last_wid or time.monotonic() - last_position >= 5):
+            current_size = get_window_size(wid) if wid is not None else None
+            source_resized = False
+            if wid != last_wid:
+                video_size = current_size
+                positioned_size = None
+            elif current_size and positioned_size and (
+                abs(current_size[0] * positioned_size[1] -
+                    current_size[1] * positioned_size[0]) >
+                0.05 * current_size[1] * positioned_size[0]
+            ):
+                # UxPlay may resize the same window when the sender rotates.
+                video_size = current_size
+                source_resized = True
+            if wid is not None and (wid != last_wid or
+                                    source_resized or
+                                    time.monotonic() - last_position >= 5):
                 try:
-                    position_window(wid, *geom, pane.get("hide_title_bar", True))
+                    target = fit_airplay_window(geom, video_size) if video_size else geom
+                    position_window(wid, *target, pane.get("hide_title_bar", True))
+                    positioned_size = target[2:]
                     last_position = time.monotonic()
                 except (OSError, subprocess.CalledProcessError):
                     log.exception("Could not position AirPlay pane '%s'", name)
