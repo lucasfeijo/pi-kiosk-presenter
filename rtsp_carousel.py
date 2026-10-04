@@ -240,6 +240,9 @@ class CarouselController:
         self.ui_queue: queue.Queue = queue.Queue()
         self.cycle_after = None
         self.retry_after = None
+        self.controls_after = None
+        self.pointer_after = None
+        self.last_pointer = None
         self.snapshot_photo = None
         cache_dir = os.path.join(self.runtime_dir, "snapshots")
         self.snapshots = SnapshotCache(
@@ -281,18 +284,22 @@ class CarouselController:
             "highlightthickness": 0,
             "takefocus": False,
         }
-        self.prev_button = tk.Button(
-            self.root,
-            text="\u2039",
-            command=lambda: self.navigate(-1),
-            **overlay,
-        )
-        self.next_button = tk.Button(
-            self.root,
-            text="\u203a",
-            command=lambda: self.navigate(1),
-            **overlay,
-        )
+        # Alpha belongs to these button-sized windows, never to the video pane.
+        self.control_windows = []
+        buttons = []
+        for text, delta in (("\u2039", -1), ("\u203a", 1)):
+            window = tk.Toplevel(self.root)
+            window.withdraw()
+            window.overrideredirect(True)
+            window.transient(self.root)
+            window.attributes("-alpha", 0.2)
+            button = tk.Button(window, text=text,
+                               command=lambda step=delta: self.navigate(step),
+                               **overlay)
+            button.pack()
+            self.control_windows.append(window)
+            buttons.append(button)
+        self.prev_button, self.next_button = buttons
         self.name_label = tk.Label(
             self.root,
             background="#20242a",
@@ -303,6 +310,10 @@ class CarouselController:
         )
 
         self.root.bind("<Configure>", self._on_configure)
+        for window in [self.root, *self.control_windows]:
+            for event in ("<Motion>", "<Enter>", "<ButtonPress>",
+                          "<KeyPress>", "<MouseWheel>"):
+                window.bind(event, self._on_interaction, add="+")
         self.root.update_idletasks()
         self.video_wids = [host.winfo_id() for host in self.video_hosts]
 
@@ -310,6 +321,7 @@ class CarouselController:
         self.snapshots.start()
         self._apply_overlay_layout()
         self.select_index(0)
+        self._poll_pointer()
         self.root.after(50, self._drain_ui_queue)
         self.root.mainloop()
 
@@ -692,19 +704,58 @@ class CarouselController:
         # Tk uses negative font sizes to request exact pixel sizing.
         self.name_label.configure(font=("DejaVu Sans", -name_font, "bold"))
         if self.pane.get("show_controls") and len(self.streams) > 1:
-            self.prev_button.place(relx=0.02, rely=0.5, anchor="w")
-            self.next_button.place(relx=0.98, rely=0.5, anchor="e")
+            self.root.update_idletasks()
+            root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+            for index, (window, button) in enumerate(zip(
+                self.control_windows, (self.prev_button, self.next_button)
+            )):
+                button_w, button_h = button.winfo_reqwidth(), button.winfo_reqheight()
+                left = round(width * 0.02) if index == 0 else round(width * 0.98) - button_w
+                top = round((height - button_h) / 2)
+                window.geometry(f"{button_w}x{button_h}{root_x + left:+d}{root_y + top:+d}")
+                window.deiconify()
         else:
-            self.prev_button.place_forget()
-            self.next_button.place_forget()
+            for window in self.control_windows:
+                window.withdraw()
         self._update_name()
 
     def _raise_overlays(self):
         if stream_name_position(self.pane):
             self.name_label.lift()
         if self.pane.get("show_controls") and len(self.streams) > 1:
-            self.prev_button.lift()
-            self.next_button.lift()
+            for window in self.control_windows:
+                window.lift(self.root)
+
+    def _on_interaction(self, _event=None):
+        if self.shutting_down or not self.pane.get("show_controls"):
+            return
+        if self.controls_after is not None:
+            self.root.after_cancel(self.controls_after)
+        for window in self.control_windows:
+            window.attributes("-alpha", 1.0)
+        self.controls_after = self.root.after(3000, self._dim_controls)
+
+    def _dim_controls(self):
+        self.controls_after = None
+        if self.shutting_down:
+            return
+        for window in self.control_windows:
+            window.attributes("-alpha", 0.2)
+
+    def _poll_pointer(self):
+        # mpv's embedded X11 window can consume motion events before Tk sees them.
+        if self.shutting_down:
+            return
+        pointer = self.root.winfo_pointerxy()
+        x, y = pointer
+        inside = (
+            self.root.winfo_rootx() <= x < self.root.winfo_rootx() + self.root.winfo_width()
+            and self.root.winfo_rooty() <= y < self.root.winfo_rooty() + self.root.winfo_height()
+        )
+        if self.last_pointer is not None and pointer != self.last_pointer and inside:
+            self._on_interaction()
+        self.last_pointer = pointer
+        self.pointer_after = self.root.after(100, self._poll_pointer)
 
     def _on_configure(self, event):
         if event.widget is not self.root or self.shutting_down:
@@ -755,6 +806,11 @@ class CarouselController:
         if self.shutting_down:
             return
         self.shutting_down = True
+        for timer in (self.controls_after, self.pointer_after):
+            if timer is not None:
+                self.root.after_cancel(timer)
+        self.controls_after = None
+        self.pointer_after = None
         self._cancel_retry()
         if self.cycle_after is not None:
             try:

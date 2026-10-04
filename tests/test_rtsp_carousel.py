@@ -393,6 +393,8 @@ class KeepAliveControllerTests(unittest.TestCase):
         c.mpv_lock = threading.Lock()
         c.switch_lock = threading.Lock()
         c.keep_alive_after = {}
+        c.controls_after = None
+        c.pointer_after = None
         c.retiring_players = []
         c.video_hosts = [mock.Mock(), mock.Mock()]
         c.video_host = c.video_hosts[0]
@@ -504,6 +506,82 @@ class KeepAliveControllerTests(unittest.TestCase):
         )
         self.assertFalse(c.players)
         c.root.destroy.assert_called_once()
+
+
+class ButtonOpacityTests(unittest.TestCase):
+    def setUp(self):
+        c = self.controller = object.__new__(CarouselController)
+        c.root = mock.Mock()
+        c.root.after.side_effect = ["first", "second"]
+        c.pane = carousel_pane(show_controls=True)
+        c.control_windows = [mock.Mock(), mock.Mock()]
+        c.controls_after = None
+        c.shutting_down = False
+
+    def test_interaction_brightens_only_buttons_and_resets_three_second_timer(self):
+        c = self.controller
+        c._on_interaction()
+        c.root.after.assert_called_with(3000, c._dim_controls)
+        c._on_interaction()
+        c.root.after_cancel.assert_called_once_with("first")
+        self.assertEqual(c.controls_after, "second")
+        for window in c.control_windows:
+            window.attributes.assert_has_calls([
+                mock.call("-alpha", 1.0), mock.call("-alpha", 1.0)
+            ])
+        c.root.attributes.assert_not_called()
+
+    def test_inactivity_dims_only_buttons(self):
+        c = self.controller
+        c._on_interaction()
+        c._dim_controls()
+        self.assertIsNone(c.controls_after)
+        for window in c.control_windows:
+            window.attributes.assert_called_with("-alpha", 0.2)
+        c.root.attributes.assert_not_called()
+
+    def test_disabled_controls_do_not_schedule_timer(self):
+        c = self.controller
+        c.pane["show_controls"] = False
+        c._on_interaction()
+        c.root.after.assert_not_called()
+
+    def test_embedded_video_pointer_movement_counts_as_interaction(self):
+        c = self.controller
+        c.last_pointer = (100, 100)
+        c.root.winfo_pointerxy.return_value = (120, 110)
+        c.root.winfo_rootx.return_value = 0
+        c.root.winfo_rooty.return_value = 0
+        c.root.winfo_width.return_value = 500
+        c.root.winfo_height.return_value = 500
+        c._on_interaction = mock.Mock()
+        c._poll_pointer()
+        c._on_interaction.assert_called_once()
+        c._on_interaction.reset_mock()
+        c._poll_pointer()
+        c._on_interaction.assert_not_called()
+
+
+class CompositorTests(unittest.TestCase):
+    @mock.patch("display_server.subprocess.Popen")
+    @mock.patch("display_server._run_x11")
+    def test_existing_compositor_is_preserved(self, run_x11, popen):
+        x11 = mock.Mock()
+        x11.XDefaultScreen.return_value = 0
+        x11.XGetSelectionOwner.return_value = 123
+        run_x11.side_effect = lambda action: action(x11, "display")
+        self.assertIsNone(display_server.start_carousel_compositor())
+        popen.assert_not_called()
+
+    @mock.patch("display_server.subprocess.Popen")
+    @mock.patch("display_server._run_x11")
+    def test_starts_compositor_when_none_is_running(self, run_x11, popen):
+        x11 = mock.Mock()
+        x11.XDefaultScreen.return_value = 0
+        x11.XGetSelectionOwner.return_value = 0
+        run_x11.side_effect = lambda action: action(x11, "display")
+        self.assertIs(display_server.start_carousel_compositor(), popen.return_value)
+        self.assertEqual(popen.call_args.args[0], ["xcompmgr", "-n"])
 
 
 class CarouselWindowTests(unittest.TestCase):

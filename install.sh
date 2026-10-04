@@ -22,6 +22,7 @@ sudo apt-get install -y -qq \
     xinit \
     xinput \
     openbox \
+    xcompmgr \
     xdotool \
     x11-utils \
     mpv \

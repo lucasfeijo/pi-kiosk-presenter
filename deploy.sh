@@ -41,6 +41,11 @@ ssh "${PI_HOST}" "set -e
       sudo apt-get update -qq
       sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq x11-utils
     fi
+    if ! command -v xcompmgr >/dev/null 2>&1; then
+      echo 'Installing button transparency dependency…'
+      sudo apt-get update -qq
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xcompmgr
+    fi
     if ! command -v scrot >/dev/null 2>&1; then
       echo 'Installing scrot…'
       sudo apt-get update -qq

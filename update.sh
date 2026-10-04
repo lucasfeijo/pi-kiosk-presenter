@@ -21,6 +21,12 @@ if ! command -v xdpyinfo >/dev/null 2>&1; then
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq x11-utils
 fi
 
+if ! command -v xcompmgr >/dev/null 2>&1; then
+    echo "Missing button transparency dependency (xcompmgr). Installing…"
+    sudo apt-get update -qq
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xcompmgr
+fi
+
 if ! command -v scrot >/dev/null 2>&1; then
     echo "Missing dependency detected (scrot). Installing…"
     sudo apt-get update -qq

@@ -358,9 +358,13 @@ Carousel fields:
 | `streams` | Non-empty array of stream objects. A name and at least one of `url` or `snapshot_url` are required. | required |
 | `snapshot_refresh_seconds` | Refresh every configured snapshot endpoint at this panel-wide frequency. Omit or use `0` to fetch each once at pane startup. | `0` |
 | `cycle_seconds` | Automatically advance and wrap after this many seconds. Manual navigation resets the timer. | `0` (off) |
-| `show_controls` | Show always-visible previous/next buttons when at least two streams exist. | `false` |
+| `show_controls` | Show previous/next buttons at 20% opacity, rising to 100% for 3 seconds after pointer, touch, click, or keyboard interaction with the pane. | `false` |
 | `stream_name_position` | Camera-name overlay location: `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, or `bottom-right`. Omit to hide it. | hidden |
 | `stream_name_font_size` | Camera-name overlay font size in pixels. Omit for responsive sizing. | automatic |
+
+Button transparency affects only the previous/next buttons. The server starts
+`xcompmgr` when X11 has no compositor; install and update scripts include this
+dependency. Without compositing the buttons remain opaque.
 
 Stream fields:
 

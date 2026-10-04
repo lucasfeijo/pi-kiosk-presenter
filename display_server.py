@@ -560,6 +560,29 @@ def _run_x11(action):
             x11.XCloseDisplay(display)
 
 
+def start_carousel_compositor():
+    """Enable alpha for button overlays without replacing an existing compositor."""
+    active = []
+    try:
+        def check(x11, display):
+            x11.XDefaultScreen.argtypes = [ctypes.c_void_p]
+            x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+            x11.XInternAtom.restype = ctypes.c_ulong
+            x11.XGetSelectionOwner.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            x11.XGetSelectionOwner.restype = ctypes.c_ulong
+            screen = x11.XDefaultScreen(display)
+            atom = x11.XInternAtom(display, f"_NET_WM_CM_S{screen}".encode(), False)
+            active.append(bool(x11.XGetSelectionOwner(display, atom)))
+        _run_x11(check)
+        if active[0]:
+            return None
+        return subprocess.Popen(["xcompmgr", "-n"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, RuntimeError):
+        log.warning("Carousel button transparency unavailable; install xcompmgr")
+        return None
+
+
 def lower_x11_windows(wids: list[int]):
     """Lower carousel Tk roots, which Openbox keeps over normal clients."""
     if not wids:
@@ -567,7 +590,34 @@ def lower_x11_windows(wids: list[int]):
     try:
         def lower(x11, display):
             x11.XLowerWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+            x11.XDefaultRootWindow.restype = ctypes.c_ulong
+            window_ptr = ctypes.POINTER(ctypes.c_ulong)
+            x11.XQueryTree.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                      window_ptr, window_ptr,
+                                      ctypes.POINTER(window_ptr), ctypes.POINTER(ctypes.c_uint)]
+            x11.XGetTransientForHint.argtypes = [ctypes.c_void_p, ctypes.c_ulong, window_ptr]
+            x11.XFree.argtypes = [ctypes.c_void_p]
+            root, parent = ctypes.c_ulong(), ctypes.c_ulong()
+            children, count = window_ptr(), ctypes.c_uint()
+            overlays = {wid: [] for wid in wids}
+            try:
+                if x11.XQueryTree(display, x11.XDefaultRootWindow(display),
+                                  ctypes.byref(root), ctypes.byref(parent),
+                                  ctypes.byref(children), ctypes.byref(count)):
+                    for index in range(count.value):
+                        owner = ctypes.c_ulong()
+                        child = children[index]
+                        if x11.XGetTransientForHint(display, child, ctypes.byref(owner)):
+                            if owner.value in overlays:
+                                overlays[owner.value].append(child)
+            finally:
+                if children:
+                    x11.XFree(children)
             for wid in wids:
+                # Keep the button windows just above their lowered carousel root.
+                for overlay in overlays[wid]:
+                    x11.XLowerWindow(display, overlay)
                 x11.XLowerWindow(display, wid)
 
         _run_x11(lower)
@@ -715,6 +765,7 @@ class DisplayManager:
 
     def __init__(self):
         self.panes: dict[str, ManagedPane] = {}
+        self.carousel_compositor = None
         self.lock = RLock()
         self.screen_w, self.screen_h = get_screen_resolution()
         self._current_layout: list[dict] = []
@@ -867,6 +918,10 @@ class DisplayManager:
         self, pane: dict, geom: tuple[int, int, int, int]
     ) -> subprocess.Popen:
         validate_rtsp_carousel_pane(pane)
+        if pane.get("show_controls") and len(pane["streams"]) > 1:
+            compositor = self.carousel_compositor
+            if compositor is None or compositor.poll() is not None:
+                self.carousel_compositor = start_carousel_compositor()
         name = pane.get("name", RTSP_CAROUSEL_TYPE)
         runtime_dir = tempfile.mkdtemp(prefix="pi-display-carousel-")
         config_path = os.path.join(runtime_dir, "config.json")
@@ -3406,6 +3461,14 @@ def main():
         log.info("Shutting down…")
         dm.stop_watchdog()
         dm._kill_all()
+        compositor = dm.carousel_compositor
+        if compositor and compositor.poll() is None:
+            compositor.terminate()
+            try:
+                compositor.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                compositor.kill()
+                compositor.wait()
         server.shutdown()
         sys.exit(0)
 
