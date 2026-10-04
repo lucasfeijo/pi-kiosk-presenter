@@ -648,6 +648,32 @@ class ProcessCleanupTests(unittest.TestCase):
         rmtree.assert_called_once_with("/tmp/carousel-runtime", ignore_errors=True)
 
 
+class CarouselRootWindowTests(unittest.TestCase):
+    @mock.patch("display_server.subprocess.check_output", return_value="123\n")
+    def test_unique_root_class_excludes_button_toplevels(self, check_output):
+        self.assertEqual(display_server.find_carousel_window(42), 123)
+        self.assertEqual(check_output.call_args.args[0],
+                         ["xdotool", "search", "--class", "^PiDisplayCarousel42$"])
+
+    @mock.patch("display_server.subprocess.run")
+    @mock.patch("display_server.time.sleep")
+    @mock.patch("display_server.position_window")
+    @mock.patch("display_server.find_carousel_window", return_value=123)
+    @mock.patch("display_server.find_window_by_name", return_value=123)
+    def test_carousel_positions_root_even_when_buttons_share_pane_title(
+        self, by_name, by_pid, position, _sleep, _run
+    ):
+        manager = object.__new__(DisplayManager)
+        manager.lock = threading.RLock()
+        proc = mock.Mock(pid=42)
+        manager.panes = {"cameras": ManagedPane(name="cameras", ptype="rtsp_carousel", proc=proc)}
+        manager._position_pane(carousel_pane(), "cameras", proc, (10, 20, 500, 300))
+        by_name.assert_not_called()
+        by_pid.assert_called_once_with(42)
+        position.assert_has_calls([mock.call(123, 10, 20, 500, 300, True)] * 2)
+        self.assertEqual(manager.panes["cameras"].wid, 123)
+
+
 class WindowPositionTests(unittest.TestCase):
     @mock.patch("display_server.time.sleep")
     @mock.patch("display_server.hide_x11_window_decorations")

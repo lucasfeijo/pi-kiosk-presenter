@@ -410,6 +410,22 @@ def find_window_by_pid(pid: int, retries: int = 30, delay: float = 0.5) -> Optio
     return None
 
 
+def find_carousel_window(pid: int, retries: int = 10, delay: float = 0.5) -> Optional[int]:
+    """Locate only the unique Tk root, excluding the button Toplevels."""
+    for _ in range(retries):
+        try:
+            out = subprocess.check_output(
+                ["xdotool", "search", "--class", f"^PiDisplayCarousel{pid}$"],
+                text=True, stderr=subprocess.DEVNULL,
+            ).strip()
+            if out:
+                return int(out.splitlines()[-1])
+        except subprocess.CalledProcessError:
+            pass
+        time.sleep(delay)
+    return None
+
+
 def find_window_by_name(name: str, retries: int = 30, delay: float = 0.5) -> Optional[int]:
     """Try to find an X window by name/title substring."""
     for _ in range(retries):
@@ -1068,7 +1084,8 @@ class DisplayManager:
             f"  own_window_hints = '{window_hints}',\n"
             f"  own_window_title = [[{name}]],\n"
             "  own_window_argb_visual = true,\n"
-            "  own_window_argb_value = 0,\n"
+            "  own_window_argb_value = 255,\n"
+            "  own_window_colour = '000000',\n"
             "  background = false,\n"
             "  double_buffer = true,\n"
             "  use_xft = true,\n"
@@ -1172,9 +1189,14 @@ class DisplayManager:
                 ).start()
             return
         x, y, w, h = geom
-        wid = find_window_by_name(name, retries=10, delay=0.5)
-        if wid is None:
-            wid = find_window_by_pid(proc.pid, retries=5, delay=0.5)
+        if pane.get("type") == RTSP_CAROUSEL_TYPE:
+            # Buttons are independent Toplevels owned by the same PID and may
+            # inherit the pane title. Only the Tk root may receive pane geometry.
+            wid = find_carousel_window(proc.pid)
+        else:
+            wid = find_window_by_name(name, retries=10, delay=0.5)
+            if wid is None:
+                wid = find_window_by_pid(proc.pid, retries=5, delay=0.5)
 
         if wid:
             hide_title_bar = pane.get("hide_title_bar", True)

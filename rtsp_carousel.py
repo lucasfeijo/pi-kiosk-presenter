@@ -240,6 +240,7 @@ class CarouselController:
         self.ui_queue: queue.Queue = queue.Queue()
         self.cycle_after = None
         self.retry_after = None
+        self.controls_opacity = 0.2
         self.controls_after = None
         self.pointer_after = None
         self.last_pointer = None
@@ -253,7 +254,7 @@ class CarouselController:
         )
 
         x, y, width, height = [int(value) for value in config["geom"]]
-        self.root = tk.Tk()
+        self.root = tk.Tk(className=f"PiDisplayCarousel{os.getpid()}")
         configure_carousel_window(self.root, self.pane, (x, y, width, height))
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
 
@@ -289,6 +290,8 @@ class CarouselController:
         buttons = []
         for text, delta in (("\u2039", -1), ("\u203a", 1)):
             window = tk.Toplevel(self.root)
+            window.title(f"carousel-control-{os.getpid()}-{delta}")
+            window.configure(background=overlay["background"])
             window.withdraw()
             window.overrideredirect(True)
             window.transient(self.root)
@@ -714,6 +717,9 @@ class CarouselController:
                 top = round((height - button_h) / 2)
                 window.geometry(f"{button_w}x{button_h}{root_x + left:+d}{root_y + top:+d}")
                 window.deiconify()
+                # Tk resets alpha set before the first map on X11.
+                window.update_idletasks()
+                window.attributes("-alpha", self.controls_opacity)
         else:
             for window in self.control_windows:
                 window.withdraw()
@@ -731,16 +737,18 @@ class CarouselController:
             return
         if self.controls_after is not None:
             self.root.after_cancel(self.controls_after)
+        self.controls_opacity = 1.0
         for window in self.control_windows:
-            window.attributes("-alpha", 1.0)
+            window.attributes("-alpha", self.controls_opacity)
         self.controls_after = self.root.after(3000, self._dim_controls)
 
     def _dim_controls(self):
         self.controls_after = None
         if self.shutting_down:
             return
+        self.controls_opacity = 0.2
         for window in self.control_windows:
-            window.attributes("-alpha", 0.2)
+            window.attributes("-alpha", self.controls_opacity)
 
     def _poll_pointer(self):
         # mpv's embedded X11 window can consume motion events before Tk sees them.
