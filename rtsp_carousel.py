@@ -207,7 +207,7 @@ def configure_carousel_window(root, pane: dict, geom: tuple[int, int, int, int])
 
 
 class CarouselController:
-    """Own the pane window, exactly one mpv child, overlays, and timers."""
+    """Own the pane window, mpv children for visible and retained streams, overlays, and timers."""
 
     def __init__(self, config: dict):
         import tkinter as tk
@@ -232,6 +232,9 @@ class CarouselController:
         self.shutting_down = False
         self.video_visible = False
         self.mpv_proc: Optional[subprocess.Popen] = None
+        self.players = {}
+        self.retiring_players = []
+        self.keep_alive_after = {}
         self.mpv_lock = threading.Lock()
         self.switch_lock = threading.Lock()
         self.ui_queue: queue.Queue = queue.Queue()
@@ -251,13 +254,14 @@ class CarouselController:
         configure_carousel_window(self.root, self.pane, (x, y, width, height))
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
 
-        self.video_host = tk.Frame(
-            self.root,
-            background="black",
-            borderwidth=0,
-            highlightthickness=0,
-        )
-        self.video_host.place(x=0, y=0, relwidth=1, relheight=1)
+        # Separate embedded windows prevent retained players painting over each other.
+        self.video_hosts = []
+        for _stream in self.streams:
+            host = tk.Frame(self.root, background="black", borderwidth=0,
+                            highlightthickness=0)
+            host.place(x=0, y=0, relwidth=1, relheight=1)
+            self.video_hosts.append(host)
+        self.video_host = self.video_hosts[0]
 
         self.snapshot_label = tk.Label(
             self.root,
@@ -300,7 +304,7 @@ class CarouselController:
 
         self.root.bind("<Configure>", self._on_configure)
         self.root.update_idletasks()
-        self.video_wid = self.video_host.winfo_id()
+        self.video_wids = [host.winfo_id() for host in self.video_hosts]
 
     def run(self):
         self.snapshots.start()
@@ -317,14 +321,25 @@ class CarouselController:
     def select_index(self, index: int):
         if self.shutting_down:
             return
-        self.current_index = wrapped_index(index, len(self.streams))
-        self.generation += 1
-        generation = self.generation
+        with self.mpv_lock:
+            previous = self.current_index
+            self.current_index = wrapped_index(index, len(self.streams))
+            self.generation += 1
+            generation = self.generation
+        self._cancel_keep_alive(self.current_index)
+        if previous != self.current_index:
+            self._retire_stream(previous)
+        self.video_host = self.video_hosts[self.current_index]
+        with self.mpv_lock:
+            player = self.players.get(self.current_index)
+            self.mpv_proc = player["proc"] if player else None
         self.video_visible = False
         self._cancel_retry()
         self._update_name()
         self._render_snapshot(raise_layer=True)
         self._reset_cycle_timer()
+        if player and player["ready"] and player["proc"].poll() is None:
+            self._reveal_video(self.current_index, player["proc"])
         thread = threading.Thread(
             target=self._switch_worker,
             args=(generation, self.current_index),
@@ -335,9 +350,9 @@ class CarouselController:
 
     def _switch_worker(self, generation: int, index: int):
         with self.switch_lock:
-            self._stop_mpv()
             if self.shutting_down or generation != self.generation:
                 return
+            self._sync_audio()
             if not (self.streams[index].get("url") or "").strip():
                 log.info(
                     "Displaying snapshot-only stream %d/%d '%s'",
@@ -346,7 +361,11 @@ class CarouselController:
                     self.streams[index]["name"],
                 )
                 return
-            self._start_mpv(generation, index)
+            with self.mpv_lock:
+                player = self.players.get(index)
+            if not player or player["proc"].poll() is not None:
+                self._start_mpv(generation, index)
+            self._sync_audio()
 
     def _start_mpv(self, generation: int, index: int):
         ipc_path = os.path.join(self.runtime_dir, f"mpv-{generation}.sock")
@@ -361,7 +380,7 @@ class CarouselController:
             playback_config,
             url,
             title="pi-display-carousel-video",
-            wid=self.video_wid,
+            wid=self.video_wids[index],
             ipc_path=ipc_path,
         )
         log.info(
@@ -381,21 +400,26 @@ class CarouselController:
             self._queue_ui(self._handle_start_failure, generation)
             return
 
-        if self.shutting_down or generation != self.generation:
+        with self.mpv_lock:
+            stale = self.shutting_down or generation != self.generation
+            if not stale:
+                self.players[index] = {
+                    "proc": proc, "ipc_path": ipc_path, "ready": False
+                }
+                self.mpv_proc = proc
+        if stale:
             self._terminate_process(proc)
             return
-        with self.mpv_lock:
-            self.mpv_proc = proc
 
         threading.Thread(
             target=self._watch_ipc,
-            args=(generation, proc, ipc_path),
+            args=(index, proc, ipc_path),
             daemon=True,
             name=f"carousel-ipc-{generation}",
         ).start()
         threading.Thread(
             target=self._watch_process,
-            args=(generation, proc),
+            args=(index, proc),
             daemon=True,
             name=f"carousel-mpv-{generation}",
         ).start()
@@ -412,7 +436,7 @@ class CarouselController:
 
     def _watch_ipc(
         self,
-        generation: int,
+        index: int,
         proc: subprocess.Popen,
         ipc_path: str,
     ):
@@ -455,33 +479,36 @@ class CarouselController:
                     if ready:
                         self._queue_ui(
                             self._reveal_video,
-                            generation,
+                            index,
                             proc,
                         )
                         return
         except OSError:
             pass
 
-    def _watch_process(self, generation: int, proc: subprocess.Popen):
+    def _watch_process(self, index: int, proc: subprocess.Popen):
         return_code = proc.wait()
-        self._queue_ui(self._handle_mpv_exit, generation, proc, return_code)
+        self._queue_ui(self._handle_mpv_exit, index, proc, return_code)
 
     def _handle_mpv_exit(
         self,
-        generation: int,
+        index: int,
         proc: subprocess.Popen,
         return_code: int,
     ):
         with self.mpv_lock:
-            if self.mpv_proc is not proc:
+            player = self.players.get(index)
+            if not player or player["proc"] is not proc:
                 return
-            self.mpv_proc = None
-        if self.shutting_down or generation != self.generation:
+            del self.players[index]
+        self._cancel_keep_alive(index)
+        if self.shutting_down or index != self.current_index:
             return
+        self.mpv_proc = None
         log.warning("Active mpv exited with code %s; retaining snapshot", return_code)
         self.video_visible = False
         self._render_snapshot(raise_layer=True)
-        self._schedule_retry(generation)
+        self._schedule_retry(self.generation)
 
     def _handle_start_failure(self, generation: int):
         if self.shutting_down or generation != self.generation:
@@ -507,21 +534,74 @@ class CarouselController:
         )
         thread.start()
 
-    def _reveal_video(self, generation: int, proc: subprocess.Popen):
+    def _reveal_video(self, index: int, proc: subprocess.Popen):
         with self.mpv_lock:
-            is_current = self.mpv_proc is proc
-        if self.shutting_down or generation != self.generation or not is_current:
+            player = self.players.get(index)
+            if not player or player["proc"] is not proc:
+                return
+            player["ready"] = True
+        threading.Thread(target=self._sync_audio, daemon=True).start()
+        if self.shutting_down or index != self.current_index:
             return
         self.video_visible = True
         self.video_host.lift(self.snapshot_label)
         self._raise_overlays()
 
+    def _sync_audio(self):
+        # Hidden streams keep decoding, but only the selected camera is audible.
+        with self.mpv_lock:
+            for index, player in self.players.items():
+                try:
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as ipc:
+                        ipc.settimeout(0.2)
+                        ipc.connect(player["ipc_path"])
+                        ipc.sendall((json.dumps({"command": [
+                            "set_property", "mute", index != self.current_index
+                        ]}) + "\n").encode())
+                except OSError:
+                    pass
+
+    def _cancel_keep_alive(self, index):
+        timer = self.keep_alive_after.pop(index, None)
+        if timer is not None:
+            self.root.after_cancel(timer)
+
+    def _retire_stream(self, index):
+        self._cancel_keep_alive(index)
+        seconds = self.streams[index].get("keep_alive_seconds")
+        if seconds:
+            self.keep_alive_after[index] = self.root.after(
+                seconds * 1000, lambda: self._expire_stream(index)
+            )
+        else:
+            self._expire_stream(index)
+
+    def _expire_stream(self, index):
+        self.keep_alive_after.pop(index, None)
+        if index == self.current_index and not self.shutting_down:
+            return
+        with self.mpv_lock:
+            player = self.players.pop(index, None)
+            if player:
+                self.retiring_players.append(player)
+        if player:
+            threading.Thread(target=self._finish_retiring,
+                             args=(player,), daemon=True).start()
+
+    def _finish_retiring(self, player):
+        self._terminate_process(player["proc"])
+        with self.mpv_lock:
+            if player in self.retiring_players:
+                self.retiring_players.remove(player)
+
     def _stop_mpv(self):
         with self.mpv_lock:
-            proc = self.mpv_proc
+            players = list(self.players.values()) + self.retiring_players
+            self.retiring_players = []
+            self.players.clear()
             self.mpv_proc = None
-        if proc is not None:
-            self._terminate_process(proc)
+        for player in players:
+            self._terminate_process(player["proc"])
 
     @staticmethod
     def _terminate_process(proc: subprocess.Popen):
@@ -554,7 +634,7 @@ class CarouselController:
         self.snapshot_photo = photo
         self.snapshot_label.configure(image=photo or "", background="black")
         if raise_layer:
-            self.snapshot_label.lift(self.video_host)
+            self.snapshot_label.lift()
             self._raise_overlays()
 
     def _fit_snapshot(self, image, width: int, height: int):
@@ -682,6 +762,8 @@ class CarouselController:
             except Exception:
                 pass
             self.cycle_after = None
+        for index in list(self.keep_alive_after):
+            self._cancel_keep_alive(index)
         self.snapshots.stop()
         with self.switch_lock:
             self._stop_mpv()

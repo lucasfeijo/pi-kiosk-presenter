@@ -300,10 +300,13 @@ curl -X POST http://pi:8686/pane \
 
 ### RTSP carousel
 
-An `rtsp_carousel` pane keeps exactly one RTSP stream active. Switching first
-stops the current `mpv`, shows the next camera's cached snapshot (or black when
-no snapshot is cached), and starts the selected stream. The video replaces the
-snapshot only after playback begins.
+An `rtsp_carousel` pane shows one camera at a time. Switching shows the next
+camera's cached snapshot (or black) until playback begins. A stream's optional
+`keep_alive_seconds` keeps its player and connection running after it leaves the
+screen, for both manual navigation and automatic cycling. Returning before the
+timeout reuses that player; leaving again starts a fresh timeout. Hidden players
+are muted. Omit the setting to stop the stream immediately. Retained streams
+continue consuming network and decoder resources. Closing the pane stops all players.
 
 A stream entry may omit `url` and provide only `snapshot_url`. Snapshot-only
 entries never launch `mpv`; they display the fetched image until the carousel
@@ -370,6 +373,7 @@ Stream fields:
 | `hwdec` | MPV hardware decoder for this stream, such as `v4l2m2m-copy` or `drm-copy`. | server default |
 | `rtsp_transport` | `tcp` or `udp` for this stream. | server default |
 | `audio` | Decode audio for this stream. | `false` |
+| `keep_alive_seconds` | Positive integer seconds to keep this stream active after it leaves the screen. Omit to disable. | off |
 | `mpv_args` | Additional MPV arguments for this stream. | `[]` |
 
 Legacy carousel definitions with these playback fields at pane level remain

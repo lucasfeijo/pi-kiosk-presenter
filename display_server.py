@@ -140,6 +140,13 @@ def validate_rtsp_carousel_pane(pane: dict):
                 "snapshot_refresh_seconds belongs to the rtsp_carousel pane, "
                 "not individual streams"
             )
+        if "keep_alive_seconds" in stream:
+            seconds = stream["keep_alive_seconds"]
+            if type(seconds) is not int or seconds <= 0:
+                raise ValueError(
+                    f"rtsp_carousel streams[{index}].keep_alive_seconds "
+                    "must be a positive integer"
+                )
         fit = stream.get("fit")
         if fit is not None and fit not in ("fill", "cover", "contain"):
             raise ValueError(
@@ -2620,6 +2627,26 @@ function renderCarouselStreams(p) {{
       row.appendChild(label);
     }});
 
+    const keepAliveLabel = document.createElement("label");
+    keepAliveLabel.textContent = "Keep alive after leaving screen (seconds)";
+    const keepAliveInput = document.createElement("input");
+    keepAliveInput.type = "number";
+    keepAliveInput.min = "1";
+    keepAliveInput.step = "1";
+    keepAliveInput.placeholder = "off";
+    keepAliveInput.value = stream.keep_alive_seconds || "";
+    keepAliveInput.onchange = () => {{
+      if (!keepAliveInput.value) {{
+        updateCarouselStream(index, "keep_alive_seconds", null);
+      }} else if (keepAliveInput.checkValidity() && Number.isSafeInteger(Number(keepAliveInput.value))) {{
+        updateCarouselStream(index, "keep_alive_seconds", Number(keepAliveInput.value));
+      }} else {{
+        keepAliveInput.reportValidity();
+      }}
+    }};
+    keepAliveLabel.appendChild(keepAliveInput);
+    row.appendChild(keepAliveLabel);
+
     const audioLabel = document.createElement("label");
     audioLabel.className = "inline";
     const audioInput = document.createElement("input");
@@ -2672,6 +2699,7 @@ function updateCarouselStream(index, key, value) {{
   if ((key === "url" || key === "snapshot_url" || key === "hwdec" || key === "rtsp_transport") && !value) delete stream[key];
   else if (key === "audio" && !value) delete stream[key];
   else if (key === "mpv_args" && (!Array.isArray(value) || !value.length)) delete stream[key];
+  else if (key === "keep_alive_seconds" && value === null) delete stream[key];
   else stream[key] = value;
   syncJson();
   persistScreens();

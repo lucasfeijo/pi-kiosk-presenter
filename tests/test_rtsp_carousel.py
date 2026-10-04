@@ -3,6 +3,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import unittest
 import urllib.request
 from unittest import mock
@@ -80,6 +81,17 @@ class CarouselValidationTests(unittest.TestCase):
             mpv_args=["--framedrop=yes"],
         )
         validate_rtsp_carousel_pane(pane)
+
+    def test_keep_alive_requires_positive_integer_when_present(self):
+        pane = carousel_pane()
+        for value in (1, 60):
+            pane["streams"][0]["keep_alive_seconds"] = value
+            validate_rtsp_carousel_pane(pane)
+        for value in (0, -1, 1.5, 1.0, True, "60", None):
+            with self.subTest(value=value):
+                pane["streams"][0]["keep_alive_seconds"] = value
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    validate_rtsp_carousel_pane(pane)
 
     def test_validates_name_position_and_font_size(self):
         for value in ("corner", "", 42):
@@ -338,6 +350,7 @@ class SnapshotOnlyControllerTests(unittest.TestCase):
         controller = object.__new__(CarouselController)
         controller.switch_lock = mock.MagicMock()
         controller._stop_mpv = mock.Mock()
+        controller._sync_audio = mock.Mock()
         controller._start_mpv = mock.Mock()
         controller.shutting_down = False
         controller.generation = 1
@@ -347,7 +360,7 @@ class SnapshotOnlyControllerTests(unittest.TestCase):
 
         controller._switch_worker(1, 0)
 
-        controller._stop_mpv.assert_called_once()
+        controller._stop_mpv.assert_not_called()
         controller._start_mpv.assert_not_called()
 
     def test_snapshot_refresh_updates_visible_snapshot_only_entry(self):
@@ -364,6 +377,133 @@ class SnapshotOnlyControllerTests(unittest.TestCase):
 
         self.assertFalse(controller.video_visible)
         controller._render_snapshot.assert_called_once_with(raise_layer=True)
+
+
+class KeepAliveControllerTests(unittest.TestCase):
+    def setUp(self):
+        self.controller = c = object.__new__(CarouselController)
+        c.root = mock.Mock()
+        c.root.after.side_effect = lambda delay, callback: (delay, callback)
+        c.pane = carousel_pane()
+        c.streams = c.pane["streams"]
+        c.streams[0]["keep_alive_seconds"] = 30
+        c.current_index = 0
+        c.generation = 1
+        c.shutting_down = False
+        c.mpv_lock = threading.Lock()
+        c.switch_lock = threading.Lock()
+        c.keep_alive_after = {}
+        c.retiring_players = []
+        c.video_hosts = [mock.Mock(), mock.Mock()]
+        c.video_host = c.video_hosts[0]
+        c.snapshot_label = mock.Mock()
+        c._render_snapshot = mock.Mock()
+        c._update_name = mock.Mock()
+        c._cancel_retry = mock.Mock()
+        c._reset_cycle_timer = mock.Mock()
+        c._raise_overlays = mock.Mock()
+        c._sync_audio = mock.Mock()
+        c._start_mpv = mock.Mock()
+        c._terminate_process = mock.Mock()
+        c._schedule_retry = mock.Mock()
+        self.proc = mock.Mock()
+        self.proc.poll.return_value = None
+        c.players = {0: {"proc": self.proc, "ipc_path": "/tmp/fake", "ready": True}}
+
+    @mock.patch("rtsp_carousel.threading.Thread")
+    def test_navigation_retains_player_and_return_reuses_it(self, thread):
+        c = self.controller
+        c.navigate(1)
+        delay, expired = c.keep_alive_after[0]
+        self.assertEqual(delay, 30000)
+        self.assertIs(c.players[0]["proc"], self.proc)
+        c._terminate_process.assert_not_called()
+        c.navigate(-1)
+        c.root.after_cancel.assert_called_once_with((delay, expired))
+        c._switch_worker(c.generation, 0)
+        c._start_mpv.assert_not_called()
+        self.assertTrue(c.video_visible)
+        c.video_hosts[0].lift.assert_called_once_with(c.snapshot_label)
+        c.navigate(1)
+        self.assertEqual(c.root.after.call_count, 2)
+
+    @mock.patch("rtsp_carousel.threading.Thread")
+    def test_automatic_cycle_uses_same_retention(self, thread):
+        c = self.controller
+        c._reset_cycle_timer = CarouselController._reset_cycle_timer.__get__(c)
+        c.cycle_after = None
+        c.cycle_seconds = 5
+        c._reset_cycle_timer()
+        delay, advance = c.cycle_after
+        self.assertEqual(delay, 5000)
+        advance()
+        self.assertEqual(c.current_index, 1)
+        self.assertEqual(c.keep_alive_after[0][0], 30000)
+        self.assertIn(0, c.players)
+
+    @mock.patch("rtsp_carousel.threading.Thread")
+    def test_expiry_removes_only_hidden_player(self, thread):
+        c = self.controller
+        c.current_index = 1
+        c._retire_stream(0)
+        c.keep_alive_after[0][1]()
+        self.assertNotIn(0, c.players)
+        thread.assert_called_once()
+        c._finish_retiring(c.retiring_players[0])
+        c._terminate_process.assert_called_once_with(self.proc)
+        self.assertFalse(c.retiring_players)
+
+    @mock.patch("rtsp_carousel.threading.Thread")
+    def test_without_setting_stops_immediately(self, thread):
+        c = self.controller
+        del c.streams[0]["keep_alive_seconds"]
+        c.current_index = 1
+        c._retire_stream(0)
+        c.root.after.assert_not_called()
+        self.assertNotIn(0, c.players)
+        thread.assert_called_once()
+
+    @mock.patch("rtsp_carousel.threading.Thread")
+    def test_hidden_readiness_never_reveals_wrong_camera(self, thread):
+        c = self.controller
+        c.current_index = 1
+        c.video_visible = False
+        c._reveal_video(0, self.proc)
+        self.assertTrue(c.players[0]["ready"])
+        self.assertFalse(c.video_visible)
+        c.video_host.lift.assert_not_called()
+
+    def test_hidden_exit_does_not_retry_or_hide_current_stream(self):
+        c = self.controller
+        c.current_index = 1
+        c._handle_mpv_exit(0, self.proc, 1)
+        self.assertNotIn(0, c.players)
+        c._schedule_retry.assert_not_called()
+        c._render_snapshot.assert_not_called()
+
+    def test_visible_reused_player_exit_retries_current_generation(self):
+        c = self.controller
+        c.generation = 9
+        c._handle_mpv_exit(0, self.proc, 1)
+        c._schedule_retry.assert_called_once_with(9)
+
+    def test_shutdown_stops_visible_retained_and_expiring_players(self):
+        c = self.controller
+        other = mock.Mock()
+        expiring = mock.Mock()
+        c.players[1] = {"proc": other}
+        c.retiring_players.append({"proc": expiring})
+        c.snapshots = mock.Mock()
+        c.cycle_after = None
+        c.keep_alive_after[0] = "timer"
+        c.shutdown()
+        c.root.after_cancel.assert_called_once_with("timer")
+        self.assertCountEqual(
+            [call.args[0] for call in c._terminate_process.call_args_list],
+            [self.proc, other, expiring],
+        )
+        self.assertFalse(c.players)
+        c.root.destroy.assert_called_once()
 
 
 class CarouselWindowTests(unittest.TestCase):
@@ -478,6 +618,8 @@ class EditorHtmlTests(unittest.TestCase):
             "function addCarouselStream()",
             "function moveCarouselStream(index, delta)",
             "MPV args (one argument per line)",
+            "Keep alive after leaving screen (seconds)",
+            "stream.keep_alive_seconds",
             "function migrateCarouselStreamOptions(p)",
         ):
             self.assertIn(marker, html)
