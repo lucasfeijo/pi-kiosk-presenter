@@ -65,6 +65,7 @@ PI_HOST=pi@other-pi.local ./deploy.sh
 |---|---|---|
 | **display_server.py** | systemd | `Restart=on-failure` with 1s delay. Server reloads `layout.json` and re-creates all panes. Rate-limited to 5 restarts per 60s. |
 | **A child pane** (mpv, chromium, feh) | Watchdog thread | Polls every 10s, re-launches dead panes from the stored layout. |
+| **A carousel stream stops producing video** | Playback watchdog | Reconnects if startup produces no video for 30s or playback stops advancing for 15s, even while mpv remains alive. Hidden stalled players are discarded and reopened when selected. |
 | **X11 / Openbox** | getty + bash_profile | Full reset: login re-runs `startx`, systemd restarts the server. |
 
 ## API Reference
@@ -164,6 +165,9 @@ stream reconnects; the selected camera, automatic cycle timer, snapshots, and
 other retained players are preserved. Snapshot-only entries are skipped. The
 interval starts when the pane starts and does not reset on navigation. Existing
 RTSP `auto_refresh` settings remain supported until edited through this field.
+Carousel playback recovery also runs when this field is blank: a live process
+alone is not treated as a healthy stream. If a source is unavailable, playback
+is retried automatically; the last available snapshot remains visible meanwhile.
 
 ### AirPlay overlay
 

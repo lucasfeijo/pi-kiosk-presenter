@@ -30,6 +30,8 @@ logging.basicConfig(
 log = logging.getLogger("rtsp-carousel")
 
 SNAPSHOT_TIMEOUT_SECONDS = 5
+PLAYBACK_START_TIMEOUT_SECONDS = 30
+PLAYBACK_STALL_TIMEOUT_SECONDS = 15
 NAME_OVERLAY_PLACEMENTS = {
     "top-left": {"relx": 0, "rely": 0, "x": 10, "y": 10, "anchor": "nw"},
     "top": {"relx": 0.5, "rely": 0, "y": 10, "anchor": "n"},
@@ -401,6 +403,9 @@ class CarouselController:
         if self.shutting_down:
             return
         self._schedule_reconnect()
+        self._restart_current()
+
+    def _restart_current(self):
         index = self.current_index
         if not (self.streams[index].get("url") or "").strip():
             return
@@ -490,7 +495,8 @@ class CarouselController:
         proc: subprocess.Popen,
         ipc_path: str,
     ):
-        deadline = time.monotonic() + 30
+        started = time.monotonic()
+        deadline = started + PLAYBACK_START_TIMEOUT_SECONDS
         connection = None
         while (
             time.monotonic() < deadline
@@ -508,33 +514,67 @@ class CarouselController:
                 connection = None
                 time.sleep(0.1)
         if not connection:
+            self._queue_ui(self._handle_mpv_stall, index, proc)
             return
+        position = None
+        last_progress = started
+        playing = False
+        buffer = b""
         try:
-            connection.settimeout(None)
+            connection.settimeout(1)
             connection.sendall(
                 b'{"command":["observe_property",1,"time-pos"]}\n'
             )
-            with connection, connection.makefile("r", encoding="utf-8") as reader:
-                for line in reader:
+            with connection:
+                while not self.shutting_down and proc.poll() is None:
                     try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    ready = event.get("event") == "playback-restart"
-                    ready = ready or (
-                        event.get("event") == "property-change"
-                        and event.get("name") == "time-pos"
-                        and event.get("data") is not None
-                    )
-                    if ready:
-                        self._queue_ui(
-                            self._reveal_video,
-                            index,
-                            proc,
-                        )
-                        return
+                        data = connection.recv(65536)
+                        if not data:
+                            break
+                        buffer += data
+                    except socket.timeout:
+                        pass
+                    while b"\n" in buffer:
+                        line, buffer = buffer.split(b"\n", 1)
+                        try:
+                            event = json.loads(line)
+                        except (ValueError, UnicodeDecodeError):
+                            continue
+                        value = event.get("data")
+                        if (event.get("event") == "property-change"
+                                and event.get("name") == "time-pos"
+                                and isinstance(value, (int, float))
+                                and value != position
+                                and (position is not None or value > 0)):
+                            position = value
+                            last_progress = time.monotonic()
+                            if not playing:
+                                playing = True
+                                self._queue_ui(self._reveal_video, index, proc)
+                    timeout = (PLAYBACK_STALL_TIMEOUT_SECONDS if playing
+                               else PLAYBACK_START_TIMEOUT_SECONDS)
+                    if time.monotonic() - last_progress >= timeout:
+                        break
         except OSError:
             pass
+        finally:
+            connection.close()
+        self._queue_ui(self._handle_mpv_stall, index, proc)
+
+    def _handle_mpv_stall(self, index: int, proc: subprocess.Popen):
+        if self.shutting_down or proc.poll() is not None:
+            return
+        with self.mpv_lock:
+            player = self.players.get(index)
+            if not player or player["proc"] is not proc:
+                return
+        log.warning("Stream '%s' stopped producing video; reconnecting",
+                    self.streams[index]["name"])
+        if index == self.current_index:
+            self._restart_current()
+        else:
+            self._cancel_keep_alive(index)
+            self._expire_stream(index)
 
     def _watch_process(self, index: int, proc: subprocess.Popen):
         return_code = proc.wait()

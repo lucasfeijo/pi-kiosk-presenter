@@ -1,4 +1,6 @@
 import os
+import json
+import socket
 import shutil
 import signal
 import subprocess
@@ -393,6 +395,45 @@ class SnapshotOnlyControllerTests(unittest.TestCase):
         controller._render_snapshot.assert_called_once_with(raise_layer=True)
 
 
+class PlaybackWatchdogTests(unittest.TestCase):
+    def watch(self, samples):
+        controller = object.__new__(CarouselController)
+        controller.shutting_down = False
+        controller._queue_ui = mock.Mock()
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        now = [0]
+        connection = mock.MagicMock()
+        def receive(_size):
+            elapsed, value = samples.pop(0)
+            now[0] += elapsed
+            if value is None:
+                raise socket.timeout()
+            return (json.dumps({'event': 'property-change', 'name': 'time-pos',
+                                'data': value}) + '\n').encode()
+        connection.recv.side_effect = receive
+        with mock.patch('rtsp_carousel.socket.socket', return_value=connection), \
+                mock.patch('rtsp_carousel.time.monotonic', side_effect=lambda: now[0]):
+            controller._watch_ipc(0, proc, '/tmp/test.sock')
+        return controller, proc
+
+    def test_live_process_with_no_video_is_recovered_after_start_timeout(self):
+        controller, proc = self.watch([(0, 0), (30, None)])
+        controller._queue_ui.assert_called_once_with(controller._handle_mpv_stall, 0, proc)
+
+    def test_monitor_keeps_watching_after_first_frame_and_recovers_frozen_video(self):
+        controller, proc = self.watch([(1, 1), (10, 2), (10, 2), (5, None)])
+        self.assertEqual(controller._queue_ui.call_args_list, [
+            mock.call(controller._reveal_video, 0, proc),
+            mock.call(controller._handle_mpv_stall, 0, proc),
+        ])
+
+    def test_advancing_video_resets_the_stall_deadline(self):
+        controller, proc = self.watch([(1, 1), (10, 11), (10, 21), (15, None)])
+        self.assertEqual(controller._queue_ui.call_count, 2)
+        controller._queue_ui.assert_called_with(controller._handle_mpv_stall, 0, proc)
+
+
 class KeepAliveControllerTests(unittest.TestCase):
     def setUp(self):
         self.controller = c = object.__new__(CarouselController)
@@ -510,6 +551,36 @@ class KeepAliveControllerTests(unittest.TestCase):
             c.pane["reconnect_minutes"] = value
             c._schedule_reconnect()
         c.root.after.assert_not_called()
+
+    @mock.patch("rtsp_carousel.threading.Thread")
+    def test_stalled_player_recovers_without_changing_periodic_or_cycle_timers(self, thread):
+        c = self.controller
+        c.reconnect_after = "periodic"
+        c.cycle_after = "cycle"
+        c._handle_mpv_stall(0, self.proc)
+        self.assertEqual(c.reconnect_after, "periodic")
+        self.assertEqual(c.cycle_after, "cycle")
+        c.root.after.assert_not_called()
+        thread.assert_called_once()
+        self.assertEqual(thread.call_args.kwargs['args'], (2, 0, True))
+
+    @mock.patch("rtsp_carousel.threading.Thread")
+    def test_stale_stall_callback_cannot_restart_replacement_player(self, thread):
+        c = self.controller
+        c.players[0]['proc'] = mock.Mock()
+        c._handle_mpv_stall(0, self.proc)
+        thread.assert_not_called()
+
+    @mock.patch("rtsp_carousel.threading.Thread")
+    def test_hidden_stalled_player_is_discarded_without_touching_selected_video(self, thread):
+        c = self.controller
+        c.current_index = 1
+        c._handle_mpv_stall(0, self.proc)
+        self.assertNotIn(0, c.players)
+        c._render_snapshot.assert_not_called()
+        c._start_mpv.assert_not_called()
+        c._finish_retiring(c.retiring_players[0])
+        c._terminate_process.assert_called_once_with(self.proc)
 
     @mock.patch("rtsp_carousel.threading.Thread")
     def test_reconnection_preserves_selection_cycle_and_retained_players(self, thread):
