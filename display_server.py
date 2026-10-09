@@ -11,6 +11,7 @@ Requires: Python 3.9+, xdotool, xdpyinfo, mpv, chromium, feh, Tk, Pillow
 import ctypes
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -107,6 +108,15 @@ def validate_rtsp_carousel_pane(pane: dict):
     """Validate the public rtsp_carousel pane shape without mutating it."""
     if not isinstance(pane, dict):
         raise ValueError("pane must be an object")
+    if pane.get("type") in ("rtsp", "stream", RTSP_CAROUSEL_TYPE):
+        minutes = pane.get("reconnect_minutes")
+        if minutes not in (None, "") and (
+            isinstance(minutes, bool)
+            or not isinstance(minutes, (int, float))
+            or not math.isfinite(minutes)
+            or minutes <= 0
+        ):
+            raise ValueError("reconnect_minutes must be a positive finite number")
     if pane.get("type") != RTSP_CAROUSEL_TYPE:
         return
 
@@ -1213,6 +1223,8 @@ class DisplayManager:
             log.info("Pane '%s' → wid=%d  geom=%dx%d+%d+%d", name, wid, w, h, x, y)
 
             auto_refresh = pane.get("auto_refresh", 0)
+            if pane.get("type") in ("rtsp", "stream"):
+                auto_refresh = pane.get("reconnect_minutes") or auto_refresh
             try:
                 auto_refresh = float(auto_refresh or 0)
             except (TypeError, ValueError):
@@ -2117,6 +2129,10 @@ label.inline input{{width:auto}}
     <div class="property-field"><label title="Reload every N minutes (0 = off). Web panes reset the timer on interaction; rtsp streams hard reload on schedule.">Auto-refresh (min)</label>
     <input id="p-autorefresh" type="number" step="1" min="0" onchange="updateAutoRefresh(this.value)"></div>
     </div>
+    <div id="reconnect-extra" class="property-section" style="display:none">
+    <div class="property-field"><label title="Force the selected stream to reconnect every N minutes. Blank disables scheduled reconnection; carousel navigation keeps its timing.">Reconnect stream (min)</label>
+    <input id="p-reconnect-minutes" type="number" step="any" min="0.01" placeholder="off" onchange="updateReconnectMinutes(this)"></div>
+    </div>
     <div id="clock-extra" class="property-section" style="display:none">
     <div class="property-field"><label title="strftime-style format; type \\n for a line break, e.g. %a\\n%H:%M">Format</label>
     <input id="p-format" oninput="updateProp('format',this.value)" placeholder="%H:%M:%S or %a\\n%H:%M"></div>
@@ -2588,8 +2604,10 @@ function showProps() {{
     document.getElementById("p-stream-name-font-size").value = p.stream_name_font_size || "";
   }}
   const arEx = document.getElementById("autorefresh-extra");
-  arEx.style.display = (isWeb || isRtsp) ? "" : "none";
+  arEx.style.display = isWeb ? "" : "none";
   document.getElementById("p-autorefresh").value = p.auto_refresh || "";
+  document.getElementById("reconnect-extra").style.display = (isRtsp || isCarousel) ? "" : "none";
+  document.getElementById("p-reconnect-minutes").value = p.reconnect_minutes || (isRtsp ? p.auto_refresh : "") || "";
   const clkEx = document.getElementById("clock-extra");
   clkEx.style.display = isClock ? "" : "none";
   document.getElementById("p-format").value = p.format || "";
@@ -2861,6 +2879,19 @@ function updateAutoRefresh(val) {{
   const n = parseFloat(val);
   if (!val || Number.isNaN(n) || n <= 0) delete p.auto_refresh;
   else p.auto_refresh = n;
+  syncJson();
+}}
+
+function updateReconnectMinutes(input) {{
+  if (selectedIdx < 0) return;
+  const n = Number(input.value);
+  const valid = input.value === "" || (Number.isFinite(n) && n > 0);
+  input.setCustomValidity(valid ? "" : "Enter a positive interval or leave blank.");
+  if (!valid) {{ input.reportValidity(); return; }}
+  const p = layout[selectedIdx];
+  if (input.value === "") delete p.reconnect_minutes;
+  else p.reconnect_minutes = n;
+  if (p.type === "rtsp" || p.type === "stream") delete p.auto_refresh;
   syncJson();
 }}
 

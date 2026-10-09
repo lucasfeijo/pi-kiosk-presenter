@@ -239,6 +239,7 @@ class CarouselController:
         self.switch_lock = threading.Lock()
         self.ui_queue: queue.Queue = queue.Queue()
         self.cycle_after = None
+        self.reconnect_after = None
         self.retry_after = None
         self.controls_opacity = 0.2
         self.controls_after = None
@@ -324,6 +325,7 @@ class CarouselController:
         self.snapshots.start()
         self._apply_overlay_layout()
         self.select_index(0)
+        self._schedule_reconnect()
         self._poll_pointer()
         self.root.after(50, self._drain_ui_queue)
         self.root.mainloop()
@@ -363,7 +365,7 @@ class CarouselController:
         )
         thread.start()
 
-    def _switch_worker(self, generation: int, index: int):
+    def _switch_worker(self, generation: int, index: int, reconnect: bool = False):
         with self.switch_lock:
             if self.shutting_down or generation != self.generation:
                 return
@@ -377,10 +379,43 @@ class CarouselController:
                 )
                 return
             with self.mpv_lock:
-                player = self.players.get(index)
+                player = self.players.pop(index, None) if reconnect else self.players.get(index)
+                if reconnect:
+                    self.mpv_proc = None
+            if reconnect and player:
+                self._terminate_process(player["proc"])
+                player = None
             if not player or player["proc"].poll() is not None:
                 self._start_mpv(generation, index)
             self._sync_audio()
+
+    def _schedule_reconnect(self):
+        minutes = self.pane.get("reconnect_minutes")
+        if not self.shutting_down and minutes:
+            self.reconnect_after = self.root.after(
+                max(1, int(minutes * 60000)), self._reconnect_current
+            )
+
+    def _reconnect_current(self):
+        self.reconnect_after = None
+        if self.shutting_down:
+            return
+        self._schedule_reconnect()
+        index = self.current_index
+        if not (self.streams[index].get("url") or "").strip():
+            return
+        with self.mpv_lock:
+            self.generation += 1
+            generation = self.generation
+        self._cancel_retry()
+        self.video_visible = False
+        self._render_snapshot(raise_layer=True)
+        threading.Thread(
+            target=self._switch_worker,
+            args=(generation, index, True),
+            daemon=True,
+            name=f"carousel-reconnect-{generation}",
+        ).start()
 
     def _start_mpv(self, generation: int, index: int):
         ipc_path = os.path.join(self.runtime_dir, f"mpv-{generation}.sock")
@@ -814,11 +849,12 @@ class CarouselController:
         if self.shutting_down:
             return
         self.shutting_down = True
-        for timer in (self.controls_after, self.pointer_after):
+        for timer in (self.controls_after, self.pointer_after, self.reconnect_after):
             if timer is not None:
                 self.root.after_cancel(timer)
         self.controls_after = None
         self.pointer_after = None
+        self.reconnect_after = None
         self._cancel_retry()
         if self.cycle_after is not None:
             try:

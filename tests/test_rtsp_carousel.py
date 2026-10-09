@@ -93,6 +93,20 @@ class CarouselValidationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "positive integer"):
                     validate_rtsp_carousel_pane(pane)
 
+    def test_reconnection_accepts_blank_or_positive_finite_minutes(self):
+        for pane_type in ("rtsp", "stream", "rtsp_carousel"):
+            for value in (None, "", 1, 0.1, 5.5):
+                with self.subTest(pane_type=pane_type, value=value):
+                    validate_rtsp_carousel_pane(
+                        carousel_pane(type=pane_type, reconnect_minutes=value)
+                    )
+            for value in (0, -1, True, "5", float("nan"), float("inf"), []):
+                with self.subTest(pane_type=pane_type, value=value):
+                    with self.assertRaisesRegex(ValueError, "reconnect_minutes"):
+                        validate_carousels_in_layout([
+                            carousel_pane(type=pane_type, reconnect_minutes=value)
+                        ])
+
     def test_validates_name_position_and_font_size(self):
         for value in ("corner", "", 42):
             with self.subTest(position=value):
@@ -395,6 +409,7 @@ class KeepAliveControllerTests(unittest.TestCase):
         c.keep_alive_after = {}
         c.controls_after = None
         c.pointer_after = None
+        c.reconnect_after = None
         c.retiring_players = []
         c.video_hosts = [mock.Mock(), mock.Mock()]
         c.video_host = c.video_hosts[0]
@@ -488,6 +503,60 @@ class KeepAliveControllerTests(unittest.TestCase):
         c.generation = 9
         c._handle_mpv_exit(0, self.proc, 1)
         c._schedule_retry.assert_called_once_with(9)
+
+    def test_blank_reconnect_setting_does_not_schedule_a_timer(self):
+        c = self.controller
+        for value in (None, ""):
+            c.pane["reconnect_minutes"] = value
+            c._schedule_reconnect()
+        c.root.after.assert_not_called()
+
+    @mock.patch("rtsp_carousel.threading.Thread")
+    def test_reconnection_preserves_selection_cycle_and_retained_players(self, thread):
+        c = self.controller
+        c.pane["reconnect_minutes"] = 0.5
+        c.current_index = 1
+        c.players[1] = {"proc": mock.Mock(), "ready": True}
+        c.cycle_after = "cycle-timer"
+        c._schedule_reconnect()
+        delay, reconnect = c.reconnect_after
+        self.assertEqual(delay, 30000)
+        reconnect()
+        self.assertEqual(c.current_index, 1)
+        self.assertEqual(c.cycle_after, "cycle-timer")
+        c._reset_cycle_timer.assert_not_called()
+        c._switch_worker(c.generation, 1, True)
+        self.assertIs(c.players[0]["proc"], self.proc)
+        c._start_mpv.assert_called_once_with(c.generation, 1)
+        self.assertEqual(c.root.after.call_count, 2)
+
+    @mock.patch("rtsp_carousel.threading.Thread")
+    def test_stale_reconnection_cannot_stop_a_newly_selected_stream(self, thread):
+        c = self.controller
+        c._switch_worker(c.generation - 1, 0, True)
+        c._terminate_process.assert_not_called()
+        c._start_mpv.assert_not_called()
+        self.assertIs(c.players[0]["proc"], self.proc)
+
+    @mock.patch("rtsp_carousel.threading.Thread")
+    def test_snapshot_only_reconnection_skips_player_and_keeps_timer(self, thread):
+        c = self.controller
+        c.pane["reconnect_minutes"] = 1
+        c.streams[0].pop("url")
+        c._reconnect_current()
+        thread.assert_not_called()
+        c._render_snapshot.assert_not_called()
+        self.assertEqual(c.reconnect_after[0], 60000)
+
+    def test_shutdown_cancels_reconnect_and_late_callback_is_harmless(self):
+        c = self.controller
+        c.reconnect_after = "reconnect-timer"
+        c.snapshots = mock.Mock()
+        c.cycle_after = None
+        c.shutdown()
+        c.root.after_cancel.assert_called_once_with("reconnect-timer")
+        c._reconnect_current()
+        c.root.after.assert_not_called()
 
     def test_shutdown_stops_visible_retained_and_expiring_players(self):
         c = self.controller
@@ -674,6 +743,31 @@ class CarouselRootWindowTests(unittest.TestCase):
         self.assertEqual(manager.panes["cameras"].wid, 123)
 
 
+class StreamReconnectTests(unittest.TestCase):
+    @mock.patch("display_server.subprocess.run")
+    @mock.patch("display_server.time.sleep")
+    @mock.patch("display_server.position_window")
+    @mock.patch("display_server.find_window_by_name", return_value=123)
+    def test_standalone_stream_uses_new_interval_and_preserves_legacy(self, *_mocks):
+        manager = object.__new__(DisplayManager)
+        manager.lock = threading.RLock()
+        manager._start_auto_refresh = mock.Mock()
+        proc = mock.Mock(pid=42)
+        for settings, expected in (({}, None), ({"reconnect_minutes": ""}, None),
+                                   ({"reconnect_minutes": 0.5}, 0.5),
+                                   ({"auto_refresh": 2}, 2),
+                                   ({"auto_refresh": 2, "reconnect_minutes": 3}, 3)):
+            with self.subTest(settings=settings):
+                manager._start_auto_refresh.reset_mock()
+                manager.panes = {"camera": ManagedPane(name="camera", ptype="rtsp", proc=proc)}
+                pane = {"name": "camera", "type": "rtsp", **settings}
+                manager._position_pane(pane, "camera", proc, (0, 0, 100, 100))
+                if expected is None:
+                    manager._start_auto_refresh.assert_not_called()
+                else:
+                    manager._start_auto_refresh.assert_called_once_with("camera", pane, expected)
+
+
 class WindowPositionTests(unittest.TestCase):
     @mock.patch("display_server.time.sleep")
     @mock.patch("display_server.hide_x11_window_decorations")
@@ -716,6 +810,7 @@ class EditorHtmlTests(unittest.TestCase):
             'id="p-streams"',
             'id="p-snapshot-refresh"',
             'id="p-cycle-seconds"',
+            'id="p-reconnect-minutes"',
             'id="p-show-controls"',
             'id="p-stream-name-position"',
             'id="p-stream-name-font-size"',
