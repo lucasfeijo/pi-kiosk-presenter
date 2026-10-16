@@ -396,8 +396,9 @@ class SnapshotOnlyControllerTests(unittest.TestCase):
 
 
 class PlaybackWatchdogTests(unittest.TestCase):
-    def watch(self, samples):
+    def watch(self, samples, reconnect_minutes=None):
         controller = object.__new__(CarouselController)
+        controller.pane = {"reconnect_minutes": reconnect_minutes}
         controller.shutting_down = False
         controller._queue_ui = mock.Mock()
         proc = mock.Mock()
@@ -433,6 +434,22 @@ class PlaybackWatchdogTests(unittest.TestCase):
         self.assertEqual(controller._queue_ui.call_count, 2)
         controller._queue_ui.assert_called_with(controller._handle_mpv_stall, 0, proc)
 
+    def test_connection_expires_even_while_playback_keeps_advancing(self):
+        controller, proc = self.watch([(10, 10), (10, 20), (10, 30)], 0.5)
+        self.assertEqual(controller._queue_ui.call_args_list, [
+            mock.call(controller._reveal_video, 0, proc),
+            mock.call(controller._handle_mpv_reconnect, 0, proc),
+        ])
+
+    def test_blank_interval_does_not_expire_a_healthy_connection(self):
+        for value in (None, ""):
+            with self.subTest(value=value):
+                controller, proc = self.watch(
+                    [(10, 10), (10, 20), (10, 30), (15, None)], value
+                )
+                controller._queue_ui.assert_called_with(controller._handle_mpv_stall, 0, proc)
+                self.assertEqual(controller._queue_ui.call_count, 2)
+
 
 class KeepAliveControllerTests(unittest.TestCase):
     def setUp(self):
@@ -450,7 +467,6 @@ class KeepAliveControllerTests(unittest.TestCase):
         c.keep_alive_after = {}
         c.controls_after = None
         c.pointer_after = None
-        c.reconnect_after = None
         c.retiring_players = []
         c.video_hosts = [mock.Mock(), mock.Mock()]
         c.video_host = c.video_hosts[0]
@@ -545,20 +561,11 @@ class KeepAliveControllerTests(unittest.TestCase):
         c._handle_mpv_exit(0, self.proc, 1)
         c._schedule_retry.assert_called_once_with(9)
 
-    def test_blank_reconnect_setting_does_not_schedule_a_timer(self):
-        c = self.controller
-        for value in (None, ""):
-            c.pane["reconnect_minutes"] = value
-            c._schedule_reconnect()
-        c.root.after.assert_not_called()
-
     @mock.patch("rtsp_carousel.threading.Thread")
     def test_stalled_player_recovers_without_changing_periodic_or_cycle_timers(self, thread):
         c = self.controller
-        c.reconnect_after = "periodic"
         c.cycle_after = "cycle"
         c._handle_mpv_stall(0, self.proc)
-        self.assertEqual(c.reconnect_after, "periodic")
         self.assertEqual(c.cycle_after, "cycle")
         c.root.after.assert_not_called()
         thread.assert_called_once()
@@ -587,19 +594,18 @@ class KeepAliveControllerTests(unittest.TestCase):
         c = self.controller
         c.pane["reconnect_minutes"] = 0.5
         c.current_index = 1
-        c.players[1] = {"proc": mock.Mock(), "ready": True}
+        current_proc = mock.Mock()
+        current_proc.poll.return_value = None
+        c.players[1] = {"proc": current_proc, "ready": True}
         c.cycle_after = "cycle-timer"
-        c._schedule_reconnect()
-        delay, reconnect = c.reconnect_after
-        self.assertEqual(delay, 30000)
-        reconnect()
+        c._handle_mpv_reconnect(1, current_proc)
         self.assertEqual(c.current_index, 1)
         self.assertEqual(c.cycle_after, "cycle-timer")
         c._reset_cycle_timer.assert_not_called()
         c._switch_worker(c.generation, 1, True)
         self.assertIs(c.players[0]["proc"], self.proc)
         c._start_mpv.assert_called_once_with(c.generation, 1)
-        self.assertEqual(c.root.after.call_count, 2)
+        c.root.after.assert_not_called()
 
     @mock.patch("rtsp_carousel.threading.Thread")
     def test_stale_reconnection_cannot_stop_a_newly_selected_stream(self, thread):
@@ -610,23 +616,39 @@ class KeepAliveControllerTests(unittest.TestCase):
         self.assertIs(c.players[0]["proc"], self.proc)
 
     @mock.patch("rtsp_carousel.threading.Thread")
-    def test_snapshot_only_reconnection_skips_player_and_keeps_timer(self, thread):
+    def test_hidden_connection_expires_even_while_snapshot_only_camera_is_selected(self, thread):
         c = self.controller
-        c.pane["reconnect_minutes"] = 1
-        c.streams[0].pop("url")
-        c._reconnect_current()
-        thread.assert_not_called()
+        c.current_index = 1
+        c.streams[1].pop("url")
+        c._handle_mpv_reconnect(0, self.proc)
+        self.assertNotIn(0, c.players)
         c._render_snapshot.assert_not_called()
-        self.assertEqual(c.reconnect_after[0], 60000)
+        c._finish_retiring(c.retiring_players[0])
+        c._terminate_process.assert_called_once_with(self.proc)
+        c._switch_worker(c.generation, 0)
+        c._start_mpv.assert_called_once_with(c.generation, 0)
 
-    def test_shutdown_cancels_reconnect_and_late_callback_is_harmless(self):
+    @mock.patch("rtsp_carousel.threading.Thread")
+    def test_navigation_cannot_retain_connection_waiting_for_reconnect(self, thread):
         c = self.controller
-        c.reconnect_after = "reconnect-timer"
+        c._handle_mpv_reconnect(0, self.proc)
+        generation = c.generation
+        c.navigate(1)
+        self.assertNotIn(0, c.players)
+        self.assertIn({"proc": self.proc, "ipc_path": "/tmp/fake", "ready": True,
+                       "restart_required": True}, c.retiring_players)
+        c._switch_worker(generation, 0, True)
+        c._start_mpv.assert_not_called()
+        c.navigate(-1)
+        c._switch_worker(c.generation, 0)
+        c._start_mpv.assert_called_once_with(c.generation, 0)
+
+    def test_shutdown_makes_late_reconnect_callback_harmless(self):
+        c = self.controller
         c.snapshots = mock.Mock()
         c.cycle_after = None
         c.shutdown()
-        c.root.after_cancel.assert_called_once_with("reconnect-timer")
-        c._reconnect_current()
+        c._handle_mpv_reconnect(0, self.proc)
         c.root.after.assert_not_called()
 
     def test_shutdown_stops_visible_retained_and_expiring_players(self):

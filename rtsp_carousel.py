@@ -241,7 +241,6 @@ class CarouselController:
         self.switch_lock = threading.Lock()
         self.ui_queue: queue.Queue = queue.Queue()
         self.cycle_after = None
-        self.reconnect_after = None
         self.retry_after = None
         self.controls_opacity = 0.2
         self.controls_after = None
@@ -327,7 +326,6 @@ class CarouselController:
         self.snapshots.start()
         self._apply_overlay_layout()
         self.select_index(0)
-        self._schedule_reconnect()
         self._poll_pointer()
         self.root.after(50, self._drain_ui_queue)
         self.root.mainloop()
@@ -357,7 +355,8 @@ class CarouselController:
         self._update_name()
         self._render_snapshot(raise_layer=True)
         self._reset_cycle_timer()
-        if player and player["ready"] and player["proc"].poll() is None:
+        if (player and player["ready"] and not player.get("restart_required")
+                and player["proc"].poll() is None):
             self._reveal_video(self.current_index, player["proc"])
         thread = threading.Thread(
             target=self._switch_worker,
@@ -381,6 +380,8 @@ class CarouselController:
                 )
                 return
             with self.mpv_lock:
+                player = self.players.get(index)
+                reconnect = reconnect or bool(player and player.get("restart_required"))
                 player = self.players.pop(index, None) if reconnect else self.players.get(index)
                 if reconnect:
                     self.mpv_proc = None
@@ -390,20 +391,6 @@ class CarouselController:
             if not player or player["proc"].poll() is not None:
                 self._start_mpv(generation, index)
             self._sync_audio()
-
-    def _schedule_reconnect(self):
-        minutes = self.pane.get("reconnect_minutes")
-        if not self.shutting_down and minutes:
-            self.reconnect_after = self.root.after(
-                max(1, int(minutes * 60000)), self._reconnect_current
-            )
-
-    def _reconnect_current(self):
-        self.reconnect_after = None
-        if self.shutting_down:
-            return
-        self._schedule_reconnect()
-        self._restart_current()
 
     def _restart_current(self):
         index = self.current_index
@@ -497,6 +484,10 @@ class CarouselController:
     ):
         started = time.monotonic()
         deadline = started + PLAYBACK_START_TIMEOUT_SECONDS
+        minutes = self.pane.get("reconnect_minutes")
+        reconnect_at = started + minutes * 60 if minutes else None
+        if reconnect_at is not None:
+            deadline = min(deadline, reconnect_at)
         connection = None
         while (
             time.monotonic() < deadline
@@ -527,6 +518,9 @@ class CarouselController:
             )
             with connection:
                 while not self.shutting_down and proc.poll() is None:
+                    if reconnect_at is not None and time.monotonic() >= reconnect_at:
+                        self._queue_ui(self._handle_mpv_reconnect, index, proc)
+                        return
                     try:
                         data = connection.recv(65536)
                         if not data:
@@ -562,14 +556,22 @@ class CarouselController:
         self._queue_ui(self._handle_mpv_stall, index, proc)
 
     def _handle_mpv_stall(self, index: int, proc: subprocess.Popen):
+        self._restart_player(index, proc, "video stopped advancing")
+
+    def _handle_mpv_reconnect(self, index: int, proc: subprocess.Popen):
+        self._restart_player(index, proc, "scheduled connection limit reached")
+
+    def _restart_player(self, index: int, proc: subprocess.Popen, reason: str):
         if self.shutting_down or proc.poll() is not None:
             return
         with self.mpv_lock:
             player = self.players.get(index)
             if not player or player["proc"] is not proc:
                 return
-        log.warning("Stream '%s' stopped producing video; reconnecting",
-                    self.streams[index]["name"])
+            # Keep the request attached to this connection if navigation makes
+            # the queued switch worker stale before it can replace the player.
+            player["restart_required"] = True
+        log.info("Reconnecting stream '%s': %s", self.streams[index]["name"], reason)
         if index == self.current_index:
             self._restart_current()
         else:
@@ -627,7 +629,7 @@ class CarouselController:
     def _reveal_video(self, index: int, proc: subprocess.Popen):
         with self.mpv_lock:
             player = self.players.get(index)
-            if not player or player["proc"] is not proc:
+            if not player or player["proc"] is not proc or player.get("restart_required"):
                 return
             player["ready"] = True
         threading.Thread(target=self._sync_audio, daemon=True).start()
@@ -659,7 +661,10 @@ class CarouselController:
     def _retire_stream(self, index):
         self._cancel_keep_alive(index)
         seconds = self.streams[index].get("keep_alive_seconds")
-        if seconds:
+        with self.mpv_lock:
+            player = self.players.get(index)
+            restart_required = bool(player and player.get("restart_required"))
+        if seconds and not restart_required:
             self.keep_alive_after[index] = self.root.after(
                 seconds * 1000, lambda: self._expire_stream(index)
             )
@@ -889,12 +894,11 @@ class CarouselController:
         if self.shutting_down:
             return
         self.shutting_down = True
-        for timer in (self.controls_after, self.pointer_after, self.reconnect_after):
+        for timer in (self.controls_after, self.pointer_after):
             if timer is not None:
                 self.root.after_cancel(timer)
         self.controls_after = None
         self.pointer_after = None
-        self.reconnect_after = None
         self._cancel_retry()
         if self.cycle_after is not None:
             try:

@@ -160,10 +160,12 @@ to keep the window manager's title bar and borders visible.
 RTSP/stream and RTSP carousel panes accept `reconnect_minutes`, exposed as
 **Reconnect stream (min)** in the panel. Set a positive number of minutes
 (fractions are allowed) to force periodic reconnection. Leave it blank or omit
-it to disable scheduled reconnection. In a carousel, only the selected RTSP
-stream reconnects; the selected camera, automatic cycle timer, snapshots, and
-other retained players are preserved. Snapshot-only entries are skipped. The
-interval starts when the pane starts and does not reset on navigation. Existing
+it to disable scheduled reconnection. In a carousel, the interval applies to
+each RTSP connection, including players retained by keep-alive. An expired
+visible stream reconnects immediately; an expired hidden stream closes and
+reconnects when selected again. Navigation and snapshot-only entries cannot
+skip or reset the interval. Selection, automatic cycling, and snapshots are
+preserved. The interval starts when each player starts. Existing
 RTSP `auto_refresh` settings remain supported until edited through this field.
 Carousel playback recovery also runs when this field is blank: a live process
 alone is not treated as a healthy stream. If a source is unavailable, playback
@@ -371,7 +373,7 @@ Carousel fields:
 | `streams` | Non-empty array of stream objects. A name and at least one of `url` or `snapshot_url` are required. | required |
 | `snapshot_refresh_seconds` | Refresh every configured snapshot endpoint at this panel-wide frequency. Omit or use `0` to fetch each once at pane startup. | `0` |
 | `cycle_seconds` | Automatically advance and wrap after this many seconds. Manual navigation resets the timer. | `0` (off) |
-| `reconnect_minutes` | Reconnect the selected RTSP stream every N minutes without resetting navigation. Positive number; blank or omitted disables it. | off |
+| `reconnect_minutes` | Maximum age of each RTSP connection, including hidden retained streams, without resetting navigation. Positive number; blank or omitted disables it. | off |
 | `show_controls` | Show previous/next buttons at 20% opacity, rising to 100% for 3 seconds after pointer, touch, click, or keyboard interaction with the pane. | `false` |
 | `stream_name_position` | Camera-name overlay location: `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, or `bottom-right`. Omit to hide it. | hidden |
 | `stream_name_font_size` | Camera-name overlay font size in pixels. Omit for responsive sizing. | automatic |

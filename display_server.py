@@ -2130,7 +2130,7 @@ label.inline input{{width:auto}}
     <input id="p-autorefresh" type="number" step="1" min="0" onchange="updateAutoRefresh(this.value)"></div>
     </div>
     <div id="reconnect-extra" class="property-section" style="display:none">
-    <div class="property-field"><label title="Force the selected stream to reconnect every N minutes. Blank disables scheduled reconnection; carousel navigation keeps its timing.">Reconnect stream (min)</label>
+    <div class="property-field"><label title="Reconnect each stream after N minutes, including connections kept alive in the background. Hidden streams reopen when selected. Blank disables scheduled reconnection.">Reconnect stream (min)</label>
     <input id="p-reconnect-minutes" type="number" step="any" min="0.01" placeholder="off" onchange="updateReconnectMinutes(this)"></div>
     </div>
     <div id="clock-extra" class="property-section" style="display:none">
