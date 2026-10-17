@@ -462,6 +462,8 @@ class KeepAliveControllerTests(unittest.TestCase):
         c.current_index = 0
         c.generation = 1
         c.shutting_down = False
+        c.pointer_held = False
+        c.cycle_generation = 0
         c.mpv_lock = threading.Lock()
         c.switch_lock = threading.Lock()
         c.keep_alive_after = {}
@@ -679,6 +681,8 @@ class ButtonOpacityTests(unittest.TestCase):
         c.control_windows = [mock.Mock(), mock.Mock()]
         c.controls_after = None
         c.shutting_down = False
+        c.pointer_held = False
+        c.cycle_generation = 0
 
     def test_interaction_brightens_only_buttons_and_resets_three_second_timer(self):
         c = self.controller
@@ -811,6 +815,9 @@ class ProcessCleanupTests(unittest.TestCase):
 
 
 class CarouselRootWindowTests(unittest.TestCase):
+    def setUp(self):
+        self.hints = self.enterContext(mock.patch("display_server.hide_x11_window_decorations"))
+
     @mock.patch("display_server.subprocess.check_output", return_value="123\n")
     def test_unique_root_class_excludes_button_toplevels(self, check_output):
         self.assertEqual(display_server.find_carousel_window(42), 123)
@@ -837,6 +844,7 @@ class CarouselRootWindowTests(unittest.TestCase):
 
 
 class StreamReconnectTests(unittest.TestCase):
+    @mock.patch("display_server.hide_x11_window_decorations")
     @mock.patch("display_server.subprocess.run")
     @mock.patch("display_server.time.sleep")
     @mock.patch("display_server.position_window")

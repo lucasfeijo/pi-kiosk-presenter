@@ -2,8 +2,10 @@
 """X11/Tk controller for a single rtsp_carousel display pane."""
 
 import argparse
+import ctypes
 import json
 import logging
+import math
 import os
 import queue
 import signal
@@ -20,6 +22,7 @@ from display_server import (
     STREAM_NAME_POSITIONS,
     build_mpv_rtsp_command,
     validate_rtsp_carousel_pane,
+    _run_x11,
 )
 
 
@@ -44,6 +47,91 @@ NAME_OVERLAY_PLACEMENTS = {
     "bottom-right": {"relx": 1, "rely": 1, "x": -10, "y": -10, "anchor": "se"},
 }
 assert tuple(NAME_OVERLAY_PLACEMENTS) == STREAM_NAME_POSITIONS
+
+
+def selection_border_rects(width: int, height: int):
+    """One-pixel scanlines of a rounded 3px ring, inset 1px from the pane."""
+    def span(y, inset, radius):
+        left, right = inset, width - inset
+        top, bottom = inset, height - inset
+        if right <= left or not top <= y < bottom:
+            return None
+        radius = min(radius, (right - left) / 2, (bottom - top) / 2)
+        dy = max(top + radius - (y + .5), (y + .5) - (bottom - radius), 0)
+        dx = radius - math.sqrt(max(0, radius * radius - dy * dy))
+        return math.ceil(left + dx - .5), math.floor(right - dx - .5) + 1
+
+    rectangles = []
+    for y in range(1, height - 1):
+        outer = span(y, 1, 12)
+        if outer is None:
+            continue
+        inner = span(y, 4, 9)
+        runs = [(outer[0], inner[0]), (inner[1], outer[1])] if inner else [outer]
+        rectangles.extend((left, y, right - left, 1)
+                          for left, right in runs if right > left)
+    return rectangles
+
+
+def shape_selection_border(wid: int, width: int, height: int):
+    """Shape both Tk's client and wrapper; the ring never receives input."""
+    class Rectangle(ctypes.Structure):
+        _fields_ = [('x', ctypes.c_short), ('y', ctypes.c_short),
+                    ('width', ctypes.c_ushort), ('height', ctypes.c_ushort)]
+
+    rects = selection_border_rects(width, height)
+    array = (Rectangle * len(rects))(*(Rectangle(*r) for r in rects))
+    def shape(x11, display):
+        ext = ctypes.CDLL('libXext.so.6')
+        ext.XShapeCombineRectangles.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.POINTER(Rectangle), ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ]
+        root, parent = ctypes.c_ulong(), ctypes.c_ulong()
+        children = ctypes.POINTER(ctypes.c_ulong)()
+        count = ctypes.c_uint()
+        x11.XQueryTree.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_ulong)), ctypes.POINTER(ctypes.c_uint)]
+        x11.XFree.argtypes = [ctypes.c_void_p]
+        windows = [wid]
+        if x11.XQueryTree(display, wid, ctypes.byref(root), ctypes.byref(parent),
+                         ctypes.byref(children), ctypes.byref(count)):
+            if children:
+                x11.XFree(children)
+            if parent.value and parent.value != root.value:
+                windows.append(parent.value)
+        for window in windows:
+            ext.XShapeCombineRectangles(display, window, 0, 0, 0, array, len(rects), 0, 0)
+            ext.XShapeCombineRectangles(display, window, 2, 0, 0, None, 0, 0, 0)
+    _run_x11(shape)
+
+
+def primary_pointer_down() -> Optional[bool]:
+    """Recover a release lost outside Tk or while an embedded player restarts."""
+    result = []
+    def query(x11, display):
+        window = ctypes.c_ulong
+        integer = ctypes.c_int
+        x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        x11.XDefaultRootWindow.restype = window
+        x11.XQueryPointer.argtypes = [
+            ctypes.c_void_p, window, ctypes.POINTER(window), ctypes.POINTER(window),
+            *([ctypes.POINTER(integer)] * 4), ctypes.POINTER(ctypes.c_uint),
+        ]
+        root, child = window(), window()
+        rx, ry, wx, wy = integer(), integer(), integer(), integer()
+        mask = ctypes.c_uint()
+        if x11.XQueryPointer(display, x11.XDefaultRootWindow(display),
+                             ctypes.byref(root), ctypes.byref(child),
+                             ctypes.byref(rx), ctypes.byref(ry), ctypes.byref(wx),
+                             ctypes.byref(wy), ctypes.byref(mask)):
+            result.append(bool(mask.value & (1 << 8)))  # Button1Mask
+    try:
+        _run_x11(query)
+    except (OSError, RuntimeError):
+        return None
+    return result[0] if result else None
 
 
 def wrapped_index(index: int, count: int) -> int:
@@ -241,6 +329,8 @@ class CarouselController:
         self.switch_lock = threading.Lock()
         self.ui_queue: queue.Queue = queue.Queue()
         self.cycle_after = None
+        self.cycle_generation = 0
+        self.pointer_held = False
         self.retry_after = None
         self.controls_opacity = 0.2
         self.controls_after = None
@@ -305,6 +395,12 @@ class CarouselController:
             self.control_windows.append(window)
             buttons.append(button)
         self.prev_button, self.next_button = buttons
+        self.selection_window = tk.Toplevel(self.root)
+        self.selection_window.title(f"carousel-selection-{os.getpid()}")
+        self.selection_window.withdraw()
+        self.selection_window.overrideredirect(True)
+        self.selection_window.transient(self.root)
+        self.selection_window.configure(background="#60a5fa")
         self.name_label = tk.Label(
             self.root,
             background="#20242a",
@@ -316,6 +412,8 @@ class CarouselController:
 
         self.root.bind("<Configure>", self._on_configure)
         for window in [self.root, *self.control_windows]:
+            window.bind("<ButtonPress-1>", self._on_pointer_press, add="+")
+            window.bind("<ButtonRelease-1>", self._on_pointer_release, add="+")
             for event in ("<Motion>", "<Enter>", "<ButtonPress>",
                           "<KeyPress>", "<MouseWheel>"):
                 window.bind(event, self._on_interaction, add="+")
@@ -806,11 +904,46 @@ class CarouselController:
         self._update_name()
 
     def _raise_overlays(self):
+        if self.pointer_held:
+            self.selection_window.lift(self.root)
         if stream_name_position(self.pane):
             self.name_label.lift()
         if self.pane.get("show_controls") and len(self.streams) > 1:
             for window in self.control_windows:
                 window.lift(self.root)
+
+    def _on_pointer_press(self, _event=None):
+        if self.shutting_down or self.pointer_held:
+            return
+        self.pointer_held = True
+        self._update_selection_border()
+        self._reset_cycle_timer()
+        self._on_interaction()
+
+    def _on_pointer_release(self, _event=None):
+        if self.shutting_down or not self.pointer_held:
+            return
+        self.pointer_held = False
+        self._update_selection_border()
+        self._reset_cycle_timer()
+        self._on_interaction()
+
+    def _update_selection_border(self):
+        if not self.pointer_held or self.shutting_down:
+            self.selection_window.withdraw()
+            return
+        width, height = self.root.winfo_width(), self.root.winfo_height()
+        x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        self.selection_window.geometry(f"{width}x{height}{x:+d}{y:+d}")
+        self.selection_window.update_idletasks()
+        try:
+            shape_selection_border(self.selection_window.winfo_id(), width, height)
+        except (OSError, RuntimeError):
+            log.exception("Could not shape selection border")
+            self.selection_window.withdraw()
+            return
+        self.selection_window.deiconify()
+        self._raise_overlays()
 
     def _on_interaction(self, _event=None):
         if self.shutting_down or not self.pane.get("show_controls"):
@@ -826,6 +959,8 @@ class CarouselController:
         self.controls_after = None
         if self.shutting_down:
             return
+        if self.pointer_held:
+            return
         self.controls_opacity = 0.2
         for window in self.control_windows:
             window.attributes("-alpha", self.controls_opacity)
@@ -834,6 +969,8 @@ class CarouselController:
         # mpv's embedded X11 window can consume motion events before Tk sees them.
         if self.shutting_down:
             return
+        if self.pointer_held and primary_pointer_down() is False:
+            self._on_pointer_release()
         pointer = self.root.winfo_pointerxy()
         x, y = pointer
         inside = (
@@ -849,23 +986,34 @@ class CarouselController:
         if event.widget is not self.root or self.shutting_down:
             return
         self._apply_overlay_layout()
+        self._update_selection_border()
         self._render_snapshot(raise_layer=not self.video_visible)
         if self.video_visible:
             self.video_host.lift(self.snapshot_label)
             self._raise_overlays()
 
     def _reset_cycle_timer(self):
+        self.cycle_generation += 1
         if self.cycle_after is not None:
             try:
                 self.root.after_cancel(self.cycle_after)
             except Exception:
                 pass
             self.cycle_after = None
-        if self.cycle_seconds > 0 and len(self.streams) > 1:
+        if (not self.shutting_down and not self.pointer_held
+                and self.cycle_seconds > 0 and len(self.streams) > 1):
+            generation = self.cycle_generation
             self.cycle_after = self.root.after(
                 int(self.cycle_seconds * 1000),
-                lambda: self.navigate(1),
+                lambda: self._advance_cycle(generation),
             )
+
+    def _advance_cycle(self, generation):
+        if (self.shutting_down or self.pointer_held
+                or generation != self.cycle_generation):
+            return
+        self.cycle_after = None
+        self.navigate(1)
 
     def _cancel_retry(self):
         if self.retry_after is not None:

@@ -157,6 +157,17 @@ Clock formats accept a typed `\n` as a line break, for example `%a\n%H:%M`.
 All pane types accept `hide_title_bar` (`true` by default). Set it to `false`
 to keep the window manager's title bar and borders visible.
 
+Camera (`rtsp`/`stream`) and carousel windows cannot be dragged or resized
+by touch, mouse, or window-manager move/resize actions. Use the layout editor
+to change their position and size; showing the title bar does not unlock them.
+
+Press and hold anywhere on a carousel to suspend automatic camera changes.
+A rounded blue outline (3px thick, inset 1px) marks the held pane and disappears
+on release. Live video, snapshots, and reconnection continue. Releasing the finger or left
+mouse button, even outside the pane, starts a full cycle interval. Previous/next
+buttons still work manually. This also works with controls hidden and affects
+only the carousel where the press began.
+
 RTSP/stream and RTSP carousel panes accept `reconnect_minutes`, exposed as
 **Reconnect stream (min)** in the panel. Set a positive number of minutes
 (fractions are allowed) to force periodic reconnection. Leave it blank or omit

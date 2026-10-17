@@ -333,6 +333,7 @@ def build_mpv_rtsp_command(
                 "--auto-window-resize=no",
                 "--focus-on=never",
                 "--x11-wid-title=no",
+                "--input-cursor-passthrough=yes",
             ]
         )
     elif geom is not None:
@@ -363,6 +364,8 @@ def build_mpv_rtsp_command(
         *_mpv_rtsp_perf_args(stream_pane),
         url,
         *stream_pane.get("mpv_args", []),
+        "--window-dragging=no",
+        "--input-builtin-dragging=no",
     ]
     return ["nice", "-n", "-10", "ionice", "-c", "1", "-n", "4", *cmd]
 
@@ -651,7 +654,7 @@ def lower_x11_windows(wids: list[int]):
         log.exception("Could not lower carousel windows below AirPlay")
 
 
-def hide_x11_window_decorations(wid: int):
+def hide_x11_window_decorations(wid: int, *, lock_geometry=False, hide_title_bar=True):
     """Set correctly typed Motif hints; Openbox reacts to this while mapped."""
     try:
         def hide(x11, display):
@@ -662,7 +665,10 @@ def hide_x11_window_decorations(wid: int):
                 ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int,
             ]
             atom = x11.XInternAtom(display, b"_MOTIF_WM_HINTS", False)
-            hints = (ctypes.c_ulong * 5)(2, 0, 0, 0, 0)
+            # Allow minimize/maximize/close explicitly, excluding move and resize.
+            # Keep programmatic layout changes available through X11.
+            flags = (2 if hide_title_bar else 0) | (1 if lock_geometry else 0)
+            hints = (ctypes.c_ulong * 5)(flags, 56 if lock_geometry else 0, 0, 0, 0)
             x11.XChangeProperty(
                 display, wid, atom, atom, 32, 0,
                 ctypes.cast(hints, ctypes.c_void_p), 5,
@@ -1221,6 +1227,11 @@ class DisplayManager:
                 if name in self.panes:
                     self.panes[name].wid = wid
             log.info("Pane '%s' → wid=%d  geom=%dx%d+%d+%d", name, wid, w, h, x, y)
+
+            if pane.get("type") in ("rtsp", "stream", RTSP_CAROUSEL_TYPE):
+                hide_x11_window_decorations(
+                    wid, lock_geometry=True, hide_title_bar=hide_title_bar
+                )
 
             auto_refresh = pane.get("auto_refresh", 0)
             if pane.get("type") in ("rtsp", "stream"):
