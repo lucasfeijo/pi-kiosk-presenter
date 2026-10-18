@@ -281,12 +281,25 @@ class SnapshotCache:
         )
 
     def _run(self):
-        # Always warm every configured endpoint once, without blocking playback.
-        self.fetch_all()
-        if self.refresh_seconds <= 0:
-            return
-        while not self.stop_event.wait(self.refresh_seconds):
-            self.fetch_all()
+        # Independent workers keep a slow endpoint from delaying other cameras.
+        workers = []
+        for index, stream in enumerate(self.streams):
+            url = (stream.get("snapshot_url") or "").strip()
+            if not url:
+                continue
+            seconds = float(stream.get("snapshot_refresh_seconds", self.refresh_seconds) or 0)
+            worker = threading.Thread(target=self._run_stream, args=(index, url, seconds),
+                                      daemon=True, name=f"snapshot-{index}")
+            workers.append(worker)
+            worker.start()
+        for worker in workers:
+            worker.join()
+
+    def _run_stream(self, index, url, seconds):
+        while not self.stop_event.is_set():
+            self.fetch_one(index, url)
+            if seconds <= 0 or self.stop_event.wait(seconds):
+                return
 
 
 def configure_carousel_window(root, pane: dict, geom: tuple[int, int, int, int]):

@@ -86,7 +86,7 @@ def _optional_nonnegative_number(value, field_name: str):
         parsed = float(value)
     except (TypeError, ValueError):
         raise ValueError(f"{field_name} must be a non-negative number") from None
-    if parsed < 0:
+    if not math.isfinite(parsed) or parsed < 0:
         raise ValueError(f"{field_name} must be a non-negative number")
 
 
@@ -145,11 +145,10 @@ def validate_rtsp_carousel_pane(pane: dict):
             raise ValueError(
                 f"rtsp_carousel streams[{index}] must provide url or snapshot_url"
             )
-        if "snapshot_refresh_seconds" in stream:
-            raise ValueError(
-                "snapshot_refresh_seconds belongs to the rtsp_carousel pane, "
-                "not individual streams"
-            )
+        _optional_nonnegative_number(
+            stream.get("snapshot_refresh_seconds"),
+            f"rtsp_carousel streams[{index}].snapshot_refresh_seconds",
+        )
         if "keep_alive_seconds" in stream:
             seconds = stream["keep_alive_seconds"]
             if type(seconds) is not int or seconds <= 0:
@@ -1985,6 +1984,8 @@ input:focus,select:focus{{outline:none;border-color:#58a6ff}}
 .props-grid>*,.property-section>*{{min-width:0}}
 .property-section,.props-wide{{grid-column:1 / -1}}
 .property-field label{{margin-top:6px}}
+.advanced-options{{margin-top:10px;border-top:1px solid #30363d;padding-top:8px}}
+.advanced-options>summary{{font-size:12px;color:#8b949e;cursor:pointer}}
 .props-grid>label.inline,.property-section>label.inline{{align-self:end;min-height:32px}}
 .coords{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;grid-column:1 / -1}}
 #p-streams{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;grid-column:1 / -1}}
@@ -2095,7 +2096,8 @@ label.inline input{{width:auto}}
     <div id="url-row" class="props-wide">
     <div class="property-field"><label>URL / Path</label><input id="p-url" oninput="updateUrlProp(this.value)"></div>
     </div>
-    <div id="rtsp-extra" class="property-section" style="display:none">
+    <details id="rtsp-extra" class="advanced-options props-wide" style="display:none">
+    <summary>Advanced</summary>
     <div class="property-field"><label title="Pi: v4l2m2m-copy for H.264 subs; drm-copy for H.265 mains">hwdec</label>
     <select id="p-hwdec" onchange="updateHwdec(this.value)">
       <option value="">(server default)</option>
@@ -2111,7 +2113,7 @@ label.inline input{{width:auto}}
       <option value="udp">udp (faster LAN)</option>
     </select></div>
     <label class="inline"><input type="checkbox" id="p-audio" onchange="updateAudio(this.checked)"> Decode audio</label>
-    </div>
+    </details>
     <div id="airplay-extra" class="property-section" style="display:none">
       <div class="property-field"><label>AirPlay device name</label>
       <input id="p-device-name" maxlength="80" oninput="updateProp('device_name',this.value)" placeholder="AirPlay Pi"></div>
@@ -2121,8 +2123,6 @@ label.inline input{{width:auto}}
       <label class="props-wide" style="margin-top:0">Streams</label>
       <div id="p-streams"></div>
       <button class="btn-secondary btn-sm props-wide" style="width:100%" onclick="addCarouselStream()">+ Add Stream</button>
-      <div class="property-field"><label title="Refresh every configured snapshot endpoint every N seconds. Blank or 0 fetches each once at pane startup.">Snapshot refresh (sec)</label>
-      <input id="p-snapshot-refresh" type="number" step="1" min="0" onchange="updateCarouselSeconds('snapshot_refresh_seconds',this.value)"></div>
       <div class="property-field"><label title="Advance to the next stream every N seconds. Blank or 0 disables automatic cycling.">Auto-cycle (sec)</label>
       <input id="p-cycle-seconds" type="number" step="1" min="0" onchange="updateCarouselSeconds('cycle_seconds',this.value)"></div>
       <label class="inline"><input type="checkbox" id="p-show-controls" onchange="updateCarouselBool('show_controls',this.checked)"> Show previous / next controls</label>
@@ -2608,7 +2608,6 @@ function showProps() {{
     if (!p.stream_name_position && p.show_stream_name) p.stream_name_position = "top";
     delete p.show_stream_name;
     renderCarouselStreams(p);
-    document.getElementById("p-snapshot-refresh").value = p.snapshot_refresh_seconds || "";
     document.getElementById("p-cycle-seconds").value = p.cycle_seconds || "";
     document.getElementById("p-show-controls").checked = !!p.show_controls;
     document.getElementById("p-stream-name-position").value = p.stream_name_position || "";
@@ -2659,7 +2658,8 @@ function updatePaneType(val) {{
   render();
 }}
 
-const CAROUSEL_STREAM_OPTION_KEYS = ["fit", "hwdec", "rtsp_transport", "audio", "mpv_args"];
+const CAROUSEL_STREAM_OPTION_KEYS = ["fit", "hwdec", "rtsp_transport", "audio", "mpv_args", "snapshot_refresh_seconds"];
+const streamAdvancedOpen = new WeakMap();
 
 function migrateCarouselStreamOptions(p) {{
   if (!Array.isArray(p.streams)) return;
@@ -2713,6 +2713,32 @@ function renderCarouselStreams(p) {{
       row.appendChild(label);
     }});
 
+    const refreshLabel = document.createElement("label");
+    refreshLabel.textContent = "Snapshot refresh (sec)";
+    refreshLabel.title = "Refresh this snapshot every N seconds. Blank or 0 fetches it once at startup.";
+    const refreshInput = document.createElement("input");
+    refreshInput.type = "number";
+    refreshInput.min = "0";
+    refreshInput.step = "any";
+    refreshInput.placeholder = "once at startup";
+    refreshInput.value = stream.snapshot_refresh_seconds ?? "";
+    refreshInput.onchange = () => {{
+      if (!refreshInput.value) updateCarouselStream(index, "snapshot_refresh_seconds", null);
+      else if (refreshInput.checkValidity() && Number.isFinite(Number(refreshInput.value)))
+        updateCarouselStream(index, "snapshot_refresh_seconds", Number(refreshInput.value));
+      else refreshInput.reportValidity();
+    }};
+    refreshLabel.appendChild(refreshInput);
+    row.appendChild(refreshLabel);
+
+    const advanced = document.createElement("details");
+    advanced.className = "advanced-options";
+    advanced.open = streamAdvancedOpen.get(stream) || false;
+    advanced.ontoggle = () => streamAdvancedOpen.set(stream, advanced.open);
+    const summary = document.createElement("summary");
+    summary.textContent = "Advanced";
+    advanced.appendChild(summary);
+
     [
       ["Fit", "fit", [["fill", "fill"], ["cover", "cover"], ["contain", "contain"]]],
       ["hwdec", "hwdec", [["", "(server default)"], ["v4l2m2m-copy", "v4l2m2m-copy (H.264)"], ["drm-copy", "drm-copy (H.265 / HEVC)"], ["no", "no (software)"], ["auto", "auto"]]],
@@ -2730,7 +2756,7 @@ function renderCarouselStreams(p) {{
       select.value = stream[spec[1]] || (spec[1] === "fit" ? "fill" : "");
       select.onchange = () => updateCarouselStream(index, spec[1], select.value);
       label.appendChild(select);
-      row.appendChild(label);
+      (spec[1] === "fit" ? row : advanced).appendChild(label);
     }});
 
     const keepAliveLabel = document.createElement("label");
@@ -2751,7 +2777,7 @@ function renderCarouselStreams(p) {{
       }}
     }};
     keepAliveLabel.appendChild(keepAliveInput);
-    row.appendChild(keepAliveLabel);
+    advanced.appendChild(keepAliveLabel);
 
     const audioLabel = document.createElement("label");
     audioLabel.className = "inline";
@@ -2761,7 +2787,7 @@ function renderCarouselStreams(p) {{
     audioInput.onchange = () => updateCarouselStream(index, "audio", audioInput.checked);
     audioLabel.appendChild(audioInput);
     audioLabel.appendChild(document.createTextNode(" Decode audio"));
-    row.appendChild(audioLabel);
+    advanced.appendChild(audioLabel);
 
     const argsLabel = document.createElement("label");
     argsLabel.textContent = "MPV args (one argument per line)";
@@ -2769,7 +2795,8 @@ function renderCarouselStreams(p) {{
     argsInput.value = Array.isArray(stream.mpv_args) ? stream.mpv_args.join("\\n") : "";
     argsInput.onchange = () => updateCarouselMpvArgs(index, argsInput.value);
     argsLabel.appendChild(argsInput);
-    row.appendChild(argsLabel);
+    advanced.appendChild(argsLabel);
+    row.appendChild(advanced);
     container.appendChild(row);
   }});
 }}
@@ -2805,7 +2832,7 @@ function updateCarouselStream(index, key, value) {{
   if ((key === "url" || key === "snapshot_url" || key === "hwdec" || key === "rtsp_transport") && !value) delete stream[key];
   else if (key === "audio" && !value) delete stream[key];
   else if (key === "mpv_args" && (!Array.isArray(value) || !value.length)) delete stream[key];
-  else if (key === "keep_alive_seconds" && value === null) delete stream[key];
+  else if ((key === "keep_alive_seconds" || key === "snapshot_refresh_seconds") && value === null) delete stream[key];
   else stream[key] = value;
   syncJson();
   persistScreens();

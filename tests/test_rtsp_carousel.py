@@ -151,11 +151,15 @@ class CarouselValidationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_rtsp_carousel_pane(carousel_pane(streams=streams))
 
-    def test_snapshot_refresh_is_panel_level_only(self):
-        pane = carousel_pane()
-        pane["streams"][0]["snapshot_refresh_seconds"] = 5
-        with self.assertRaisesRegex(ValueError, "belongs to"):
+    def test_snapshot_refresh_accepts_independent_intervals_and_legacy_default(self):
+        pane = carousel_pane(snapshot_refresh_seconds=10)
+        for value in (0, 1, 2.5, None, ""):
+            pane["streams"][0]["snapshot_refresh_seconds"] = value
             validate_rtsp_carousel_pane(pane)
+        for value in (-1, True, "invalid", float('nan'), float('inf')):
+            pane["streams"][0]["snapshot_refresh_seconds"] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_rtsp_carousel_pane(pane)
 
     def test_rejects_invalid_per_stream_playback_settings(self):
         invalid_settings = (
@@ -259,6 +263,56 @@ class CommandTests(unittest.TestCase):
 
 
 class SnapshotCacheTests(unittest.TestCase):
+    def test_stream_intervals_override_legacy_default_including_zero(self):
+        streams = [
+            {"snapshot_url": "http://a", "snapshot_refresh_seconds": 2},
+            {"snapshot_url": "http://b", "snapshot_refresh_seconds": 0},
+            {"snapshot_url": "http://c"},
+            {"url": "rtsp://video-only"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = SnapshotCache(streams, tmp, refresh_seconds=10)
+            cache._run_stream = mock.Mock()
+            cache._run()
+            self.assertCountEqual(cache._run_stream.call_args_list, [
+                mock.call(0, "http://a", 2), mock.call(1, "http://b", 0),
+                mock.call(2, "http://c", 10),
+            ])
+
+    def test_each_worker_waits_its_interval_and_zero_fetches_only_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for seconds, count in ((2, 2), (7, 2), (0, 1)):
+                cache = SnapshotCache([], tmp)
+                cache.fetch_one = mock.Mock()
+                cache.stop_event = mock.Mock()
+                cache.stop_event.is_set.return_value = False
+                cache.stop_event.wait.side_effect = [False, True]
+                cache._run_stream(0, "http://snapshot", seconds)
+                self.assertEqual(cache.fetch_one.call_count, count)
+                self.assertEqual(cache.stop_event.wait.call_args_list,
+                                 [mock.call(seconds)] * (2 if seconds else 0))
+
+    def test_slow_snapshot_does_not_block_another_camera(self):
+        slow_started, release_slow, fast_finished = (threading.Event() for _ in range(3))
+        def fetch(index, url):
+            if index == 0:
+                slow_started.set()
+                release_slow.wait(2)
+            else:
+                fast_finished.set()
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = SnapshotCache([{"snapshot_url": "http://slow"},
+                                   {"snapshot_url": "http://fast"}], tmp)
+            cache.fetch_one = fetch
+            try:
+                cache.start()
+                self.assertTrue(slow_started.wait(1))
+                self.assertTrue(fast_finished.wait(1))
+            finally:
+                release_slow.set()
+                cache.stop()
+            self.assertFalse(cache.thread.is_alive())
+
     def test_splits_and_decodes_embedded_url_credentials(self):
         clean_url, username, password = split_url_credentials(
             "http://admin:p%40ss@camera:8080/snapshot.jpg?channel=1"
@@ -932,7 +986,7 @@ class EditorHtmlTests(unittest.TestCase):
         for marker in (
             'option value="rtsp_carousel"',
             'id="p-streams"',
-            'id="p-snapshot-refresh"',
+            'stream.snapshot_refresh_seconds',
             'id="p-cycle-seconds"',
             'id="p-reconnect-minutes"',
             'id="p-show-controls"',

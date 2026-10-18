@@ -359,8 +359,9 @@ continue consuming network and decoder resources. Closing the pane stops all pla
 
 A stream entry may omit `url` and provide only `snapshot_url`. Snapshot-only
 entries never launch `mpv`; they display the fetched image until the carousel
-advances. Without `snapshot_refresh_seconds`, each snapshot is fetched once at
-pane startup and is not refreshed again.
+advances. Each stream has its own `snapshot_refresh_seconds` interval. Blank or
+`0` fetches that snapshot once at startup. Downloads run independently, so a
+slow endpoint does not delay other cameras.
 
 Snapshot endpoints that require HTTP authentication may embed credentials as
 `http://user:password@camera/snapshot.jpg`. Both Digest and Basic authentication
@@ -377,6 +378,7 @@ curl -X POST http://pi:8686/pane \
         "name": "Front Door",
         "url": "rtsp://192.168.1.101/live",
         "snapshot_url": "http://192.168.1.101/snapshot.jpg",
+        "snapshot_refresh_seconds": 10,
         "fit": "cover",
         "hwdec": "v4l2m2m-copy",
         "rtsp_transport": "tcp",
@@ -386,12 +388,12 @@ curl -X POST http://pi:8686/pane \
         "name": "Back Yard",
         "url": "rtsp://192.168.1.102/live",
         "snapshot_url": "http://192.168.1.102/snapshot.jpg",
+        "snapshot_refresh_seconds": 30,
         "fit": "contain",
         "hwdec": "drm-copy",
         "mpv_args": ["--framedrop=yes"]
       }
     ],
-    "snapshot_refresh_seconds": 10,
     "show_controls": true,
     "stream_name_position": "top",
     "stream_name_font_size": 24,
@@ -405,7 +407,6 @@ Carousel fields:
 | Field | Purpose | Default |
 |-------|---------|---------|
 | `streams` | Non-empty array of stream objects. A name and at least one of `url` or `snapshot_url` are required. | required |
-| `snapshot_refresh_seconds` | Refresh every configured snapshot endpoint at this panel-wide frequency. Omit or use `0` to fetch each once at pane startup. | `0` |
 | `cycle_seconds` | Automatically advance and wrap after this many seconds. Manual navigation resets the timer. | `0` (off) |
 | `reconnect_minutes` | Maximum age of each RTSP connection, including hidden retained streams, without resetting navigation. Positive number; blank or omitted disables it. | off |
 | `show_controls` | Enable previous/next buttons and interactive horizontal swipe. Buttons brighten while pressed and return to 20% immediately on release; wheel/keyboard interaction brightens them for 3 seconds. | `false` |
@@ -423,6 +424,7 @@ Stream fields:
 | `name` | Camera name used by the optional overlay. | required |
 | `url` | RTSP URL. Optional for snapshot-only entries. | — |
 | `snapshot_url` | HTTP/HTTPS image displayed before playback or for snapshot-only entries. | — |
+| `snapshot_refresh_seconds` | Refresh this snapshot every N seconds. Blank or `0` fetches once at startup. | `0` |
 | `fit` | `fill`, `cover`, or `contain`, applied to this stream's video and snapshot. | `fill` |
 | `hwdec` | MPV hardware decoder for this stream, such as `v4l2m2m-copy` or `drm-copy`. | server default |
 | `rtsp_transport` | `tcp` or `udp` for this stream. | server default |
@@ -430,8 +432,13 @@ Stream fields:
 | `keep_alive_seconds` | Positive integer seconds to keep this stream active after it leaves the screen. Omit to disable. | off |
 | `mpv_args` | Additional MPV arguments for this stream. | `[]` |
 
-Legacy carousel definitions with these playback fields at pane level remain
-loadable; the visual editor migrates them into each stream. Snapshot downloads
+The editor keeps hwdec, RTSP transport, keep alive, audio, and MPV arguments
+in an **Advanced** section, closed by default. Snapshot refresh and Fit stay visible.
+
+Legacy carousel definitions with playback fields or `snapshot_refresh_seconds`
+at pane level remain loadable. A stream-specific interval overrides the legacy
+interval, including an explicit `0`. The editor migrates the old interval into
+each stream without overwriting explicit values. Snapshot downloads
 run in the background and never delay RTSP startup. Failed refreshes retain the
 last good cached image. The legacy `show_stream_name: true` setting remains
 supported and maps to `stream_name_position: "top"`.
