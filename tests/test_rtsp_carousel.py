@@ -712,20 +712,13 @@ class ButtonOpacityTests(unittest.TestCase):
         c._on_interaction()
         c.root.after.assert_not_called()
 
-    def test_embedded_video_pointer_movement_counts_as_interaction(self):
+    def test_pointer_polling_does_not_treat_hover_as_interaction(self):
         c = self.controller
-        c.last_pointer = (100, 100)
-        c.root.winfo_pointerxy.return_value = (120, 110)
-        c.root.winfo_rootx.return_value = 0
-        c.root.winfo_rooty.return_value = 0
-        c.root.winfo_width.return_value = 500
-        c.root.winfo_height.return_value = 500
         c._on_interaction = mock.Mock()
         c._poll_pointer()
-        c._on_interaction.assert_called_once()
-        c._on_interaction.reset_mock()
         c._poll_pointer()
         c._on_interaction.assert_not_called()
+        c.root.winfo_pointerxy.assert_not_called()
 
 
 class CompositorTests(unittest.TestCase):

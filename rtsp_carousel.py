@@ -335,7 +335,6 @@ class CarouselController:
         self.controls_opacity = 0.2
         self.controls_after = None
         self.pointer_after = None
-        self.last_pointer = None
         self.snapshot_photo = None
         cache_dir = os.path.join(self.runtime_dir, "snapshots")
         self.snapshots = SnapshotCache(
@@ -370,7 +369,7 @@ class CarouselController:
         overlay = {
             "background": "#20242a",
             "foreground": "white",
-            "activebackground": "#343b44",
+            "activebackground": "#20242a",
             "activeforeground": "white",
             "relief": "flat",
             "borderwidth": 0,
@@ -414,8 +413,7 @@ class CarouselController:
         for window in [self.root, *self.control_windows]:
             window.bind("<ButtonPress-1>", self._on_pointer_press, add="+")
             window.bind("<ButtonRelease-1>", self._on_pointer_release, add="+")
-            for event in ("<Motion>", "<Enter>", "<ButtonPress>",
-                          "<KeyPress>", "<MouseWheel>"):
+            for event in ("<ButtonPress>", "<KeyPress>", "<MouseWheel>"):
                 window.bind(event, self._on_interaction, add="+")
         self.root.update_idletasks()
         self.video_wids = [host.winfo_id() for host in self.video_hosts]
@@ -966,20 +964,13 @@ class CarouselController:
             window.attributes("-alpha", self.controls_opacity)
 
     def _poll_pointer(self):
-        # mpv's embedded X11 window can consume motion events before Tk sees them.
+        # Only recover a lost release. A touchscreen leaves the pointer at the
+        # last touch, and cycling/replacing video windows can generate Enter
+        # events there without any new user interaction.
         if self.shutting_down:
             return
         if self.pointer_held and primary_pointer_down() is False:
             self._on_pointer_release()
-        pointer = self.root.winfo_pointerxy()
-        x, y = pointer
-        inside = (
-            self.root.winfo_rootx() <= x < self.root.winfo_rootx() + self.root.winfo_width()
-            and self.root.winfo_rooty() <= y < self.root.winfo_rooty() + self.root.winfo_height()
-        )
-        if self.last_pointer is not None and pointer != self.last_pointer and inside:
-            self._on_interaction()
-        self.last_pointer = pointer
         self.pointer_after = self.root.after(100, self._poll_pointer)
 
     def _on_configure(self, event):

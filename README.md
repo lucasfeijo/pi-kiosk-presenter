@@ -166,7 +166,8 @@ A rounded blue outline (3px thick, inset 1px) marks the held pane and disappears
 on release. Live video, snapshots, and reconnection continue. Releasing the finger or left
 mouse button, even outside the pane, starts a full cycle interval. Previous/next
 buttons still work manually. This also works with controls hidden and affects
-only the carousel where the press began.
+only the carousel where the press began. Pointer hovering or movement never
+selects a pane or brightens its controls, including after the last touch.
 
 RTSP/stream and RTSP carousel panes accept `reconnect_minutes`, exposed as
 **Reconnect stream (min)** in the panel. Set a positive number of minutes
@@ -385,7 +386,7 @@ Carousel fields:
 | `snapshot_refresh_seconds` | Refresh every configured snapshot endpoint at this panel-wide frequency. Omit or use `0` to fetch each once at pane startup. | `0` |
 | `cycle_seconds` | Automatically advance and wrap after this many seconds. Manual navigation resets the timer. | `0` (off) |
 | `reconnect_minutes` | Maximum age of each RTSP connection, including hidden retained streams, without resetting navigation. Positive number; blank or omitted disables it. | off |
-| `show_controls` | Show previous/next buttons at 20% opacity, rising to 100% for 3 seconds after pointer, touch, click, or keyboard interaction with the pane. | `false` |
+| `show_controls` | Show previous/next buttons at 20% opacity, rising to 100% for 3 seconds after touch, click, wheel, or keyboard interaction with the pane. | `false` |
 | `stream_name_position` | Camera-name overlay location: `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, or `bottom-right`. Omit to hide it. | hidden |
 | `stream_name_font_size` | Camera-name overlay font size in pixels. Omit for responsive sizing. | automatic |
 
