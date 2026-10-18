@@ -176,9 +176,18 @@ width or with a quick horizontal flick completes the transition. Short gestures
 animate back, and vertical gestures do not change cameras. Left advances, right
 goes back, and the ends wrap. Arrow buttons retain their normal click behavior.
 The incoming camera starts loading during the drag (muted until selected); its
-cached snapshot or name is shown while video connects. The automatic cycle
+cached snapshot is shown while video connects, without an extra centered name. The automatic cycle
 restarts with a full interval after the transition finishes. Disabling controls
 also disables swiping, while hold-to-pause remains available.
+
+Tap the camera title enabled by **Camera name location** to open a vertical
+camera list centered in that pane, using the title's font, size, and colors.
+Tap a camera to jump directly to it and close the list. The automatic cycle
+pauses while the list is open and restarts with a full interval when it closes.
+The list closes after 5 seconds without interaction; hovering does not extend
+the timeout. Long lists can be scrolled by dragging vertically or using the
+wheel. Tapping outside the list also closes it. The title
+selector works even when previous/next controls are hidden.
 
 RTSP/stream and RTSP carousel panes accept `reconnect_minutes`, exposed as
 **Reconnect stream (min)** in the panel. Set a positive number of minutes

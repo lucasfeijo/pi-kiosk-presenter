@@ -92,6 +92,7 @@ class ReleaseOpacityTests(unittest.TestCase):
         c.root = mock.Mock()
         c.shutting_down = False
         c.pointer_held = True
+        c.title_press = None
         c.controls_after = 'old-timeout'
         c.control_windows = [mock.Mock(), mock.Mock()]
         c.swipe = mock.Mock(tracking=False)

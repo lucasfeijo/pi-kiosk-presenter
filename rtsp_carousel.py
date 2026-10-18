@@ -18,6 +18,7 @@ import urllib.request
 from typing import Callable, Optional
 
 from carousel_swipe import SwipeGesture
+from camera_picker import CameraPicker
 
 from display_server import (
     RTSP_STREAM_FIELDS,
@@ -335,6 +336,7 @@ class CarouselController:
         self.cycle_after = None
         self.cycle_generation = 0
         self.pointer_held = False
+        self.title_press = None
         self.retry_after = None
         self.controls_opacity = 0.2
         self.controls_after = None
@@ -376,6 +378,7 @@ class CarouselController:
         self.name_label = self.name_labels[0]
         self.swipe = SwipeGesture(self.root, self.root.winfo_width,
                                   self._draw_swipe, self._finish_swipe)
+        self.picker = CameraPicker(tk, self.root, self._picker_closed)
 
         overlay = {
             "background": "#20242a",
@@ -900,7 +903,7 @@ class CarouselController:
                 log.warning("Could not render cached snapshot %s: %s", path, exc)
         self.snapshot_photos[index] = photo
         label = self.snapshot_labels[index]
-        label.configure(image=photo or "", text="" if photo else self.streams[index]["name"], background="black")
+        label.configure(image=photo or "", text="", background="black")
         if raise_layer:
             label.lift()
             self._raise_overlays()
@@ -960,7 +963,7 @@ class CarouselController:
         # Tk uses negative font sizes to request exact pixel sizing.
         for label in self.name_labels:
             label.configure(font=("DejaVu Sans", -name_font, "bold"))
-        if self.pane.get("show_controls") and len(self.streams) > 1:
+        if self.pane.get("show_controls") and len(self.streams) > 1 and not self.picker.is_open:
             self.root.update_idletasks()
             root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
             for index, (window, button) in enumerate(zip(
@@ -978,20 +981,26 @@ class CarouselController:
             for window in self.control_windows:
                 window.withdraw()
         self._update_name()
+        self.picker.layout()
 
     def _raise_overlays(self):
         if self.pointer_held:
             self.selection_window.lift(self.root)
         if stream_name_position(self.pane):
             self.name_label.lift()
-        if self.pane.get("show_controls") and len(self.streams) > 1:
+        if self.picker.is_open:
+            self.picker.window.lift(self.root)
+        elif self.pane.get("show_controls") and len(self.streams) > 1:
             for window in self.control_windows:
                 window.lift(self.root)
 
     def _on_pointer_press(self, _event=None):
-        if self.shutting_down or self.pointer_held:
+        if self.shutting_down or self.pointer_held or self.picker.is_open:
             return
         self.pointer_held = True
+        self.title_press = None
+        if _event is not None and _event.widget in self.name_labels:
+            self.title_press = (_event.widget, _event.x_root, _event.y_root)
         if (_event is not None and self.pane.get("show_controls")
                 and len(self.streams) > 1
                 and _event.widget not in (self.prev_button, self.next_button)):
@@ -1008,15 +1017,35 @@ class CarouselController:
         if self.controls_after is not None:
             self.root.after_cancel(self.controls_after)
         self._dim_controls()
+        coords = ((_event.x_root, _event.y_root) if _event is not None
+                  else self.root.winfo_pointerxy())
+        title_press, self.title_press = self.title_press, None
         if self.swipe.tracking:
-            coords = ((_event.x_root, _event.y_root) if _event is not None
-                      else self.root.winfo_pointerxy())
             self.swipe.release(*coords)
+        if title_press is not None:
+            label, x, y = title_press
+            if (max(abs(coords[0] - x), abs(coords[1] - y)) < 12
+                    and label.winfo_rootx() <= coords[0] < label.winfo_rootx() + label.winfo_width()
+                    and label.winfo_rooty() <= coords[1] < label.winfo_rooty() + label.winfo_height()):
+                self.picker.show(self.name_label, [s["name"] for s in self.streams])
+                self._apply_overlay_layout()
         self._reset_cycle_timer()
 
     def _on_pointer_motion(self, event):
         if self.pointer_held:
+            if self.title_press is not None:
+                _, x, y = self.title_press
+                if max(abs(event.x_root - x), abs(event.y_root - y)) >= 12:
+                    self.title_press = None
             self.swipe.move(event.x_root, event.y_root)
+
+    def _picker_closed(self, index):
+        if self.shutting_down:
+            return
+        if index is not None:
+            self.select_index(index)
+        self._apply_overlay_layout()
+        self._reset_cycle_timer()
 
     def _update_selection_border(self):
         if not self.pointer_held or self.shutting_down:
@@ -1036,7 +1065,7 @@ class CarouselController:
         self._raise_overlays()
 
     def _on_interaction(self, _event=None):
-        if self.shutting_down or not self.pane.get("show_controls"):
+        if self.shutting_down or self.picker.is_open or not self.pane.get("show_controls"):
             return
         if self.controls_after is not None:
             self.root.after_cancel(self.controls_after)
@@ -1086,6 +1115,7 @@ class CarouselController:
                 pass
             self.cycle_after = None
         if (not self.shutting_down and not self.pointer_held and not self.swipe.busy
+                and not self.picker.is_open
                 and self.cycle_seconds > 0 and len(self.streams) > 1):
             generation = self.cycle_generation
             self.cycle_after = self.root.after(
@@ -1094,7 +1124,7 @@ class CarouselController:
             )
 
     def _advance_cycle(self, generation):
-        if (self.shutting_down or self.pointer_held or self.swipe.busy
+        if (self.shutting_down or self.pointer_held or self.swipe.busy or self.picker.is_open
                 or generation != self.cycle_generation):
             return
         self.cycle_after = None
@@ -1127,6 +1157,7 @@ class CarouselController:
         if self.shutting_down:
             return
         self.shutting_down = True
+        self.picker.close(notify=False)
         self.swipe.cancel()
         for timer in (self.controls_after, self.pointer_after):
             if timer is not None:

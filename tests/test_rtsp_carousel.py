@@ -466,6 +466,8 @@ class KeepAliveControllerTests(unittest.TestCase):
         c.generation = 1
         c.shutting_down = False
         c.pointer_held = False
+        c.title_press = None
+        c.picker = mock.Mock(is_open=False)
         c.swipe = mock.Mock(busy=False, tracking=False)
         c.swipe_previews = set()
         c.cycle_generation = 0
@@ -706,6 +708,8 @@ class ButtonOpacityTests(unittest.TestCase):
         c.controls_after = None
         c.shutting_down = False
         c.pointer_held = False
+        c.title_press = None
+        c.picker = mock.Mock(is_open=False)
         c.swipe = mock.Mock(busy=False, tracking=False)
         c.swipe_previews = set()
         c.cycle_generation = 0

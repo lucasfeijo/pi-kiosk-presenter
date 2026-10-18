@@ -13,6 +13,8 @@ class HoldCycleTests(unittest.TestCase):
         c.root.after.side_effect = lambda delay, callback: (delay, callback)
         c.shutting_down = False
         c.pointer_held = False
+        c.title_press = None
+        c.picker = mock.Mock(is_open=False)
         c.swipe = mock.Mock(busy=False, tracking=False)
         c.controls_after = None
         c._dim_controls = mock.Mock()
@@ -60,6 +62,19 @@ class HoldCycleTests(unittest.TestCase):
         c.navigate.assert_not_called()
         c.swipe.busy = False
         c._reset_cycle_timer()
+        self.assertEqual(c.cycle_after[0], 2000)
+
+    def test_modal_pauses_cycle_and_closing_starts_full_interval(self):
+        c = self.c
+        stale = c.cycle_after[1]
+        c.picker.is_open = True
+        c._reset_cycle_timer()
+        self.assertIsNone(c.cycle_after)
+        stale()
+        c.navigate.assert_not_called()
+        c.picker.is_open = False
+        c._apply_overlay_layout = mock.Mock()
+        c._picker_closed(None)
         self.assertEqual(c.cycle_after[0], 2000)
 
     def test_hold_is_local_to_one_carousel(self):
