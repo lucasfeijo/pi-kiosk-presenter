@@ -17,6 +17,8 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Optional
 
+from carousel_swipe import SwipeGesture
+
 from display_server import (
     RTSP_STREAM_FIELDS,
     STREAM_NAME_POSITIONS,
@@ -323,6 +325,8 @@ class CarouselController:
         self.video_visible = False
         self.mpv_proc: Optional[subprocess.Popen] = None
         self.players = {}
+        self.player_serial = 0
+        self.swipe_previews = set()
         self.retiring_players = []
         self.keep_alive_after = {}
         self.mpv_lock = threading.Lock()
@@ -349,22 +353,29 @@ class CarouselController:
         configure_carousel_window(self.root, self.pane, (x, y, width, height))
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
 
-        # Separate embedded windows prevent retained players painting over each other.
-        self.video_hosts = []
-        for _stream in self.streams:
-            host = tk.Frame(self.root, background="black", borderwidth=0,
+        # Each page owns its video and fallback so both move with the finger.
+        self.pages, self.video_hosts, self.snapshot_labels, self.name_labels = [], [], [], []
+        self.snapshot_photos = {}
+        for stream in self.streams:
+            page = tk.Frame(self.root, background="black", borderwidth=0,
                             highlightthickness=0)
+            page.place(x=width, y=0, relwidth=1, relheight=1)
+            host = tk.Frame(page, background="black", borderwidth=0, highlightthickness=0)
             host.place(x=0, y=0, relwidth=1, relheight=1)
+            snapshot = tk.Label(page, background="black", foreground="white",
+                                borderwidth=0, highlightthickness=0)
+            snapshot.place(x=0, y=0, relwidth=1, relheight=1)
+            name = tk.Label(page, text=stream["name"], background="#20242a",
+                            foreground="white", borderwidth=0, padx=14, pady=6)
+            self.pages.append(page)
             self.video_hosts.append(host)
+            self.snapshot_labels.append(snapshot)
+            self.name_labels.append(name)
         self.video_host = self.video_hosts[0]
-
-        self.snapshot_label = tk.Label(
-            self.root,
-            background="black",
-            borderwidth=0,
-            highlightthickness=0,
-        )
-        self.snapshot_label.place(x=0, y=0, relwidth=1, relheight=1)
+        self.snapshot_label = self.snapshot_labels[0]
+        self.name_label = self.name_labels[0]
+        self.swipe = SwipeGesture(self.root, self.root.winfo_width,
+                                  self._draw_swipe, self._finish_swipe)
 
         overlay = {
             "background": "#20242a",
@@ -400,19 +411,11 @@ class CarouselController:
         self.selection_window.overrideredirect(True)
         self.selection_window.transient(self.root)
         self.selection_window.configure(background="#60a5fa")
-        self.name_label = tk.Label(
-            self.root,
-            background="#20242a",
-            foreground="white",
-            borderwidth=0,
-            padx=14,
-            pady=6,
-        )
-
         self.root.bind("<Configure>", self._on_configure)
         for window in [self.root, *self.control_windows]:
             window.bind("<ButtonPress-1>", self._on_pointer_press, add="+")
             window.bind("<ButtonRelease-1>", self._on_pointer_release, add="+")
+            window.bind("<B1-Motion>", self._on_pointer_motion, add="+")
             for event in ("<ButtonPress>", "<KeyPress>", "<MouseWheel>"):
                 window.bind(event, self._on_interaction, add="+")
         self.root.update_idletasks()
@@ -431,9 +434,63 @@ class CarouselController:
             return
         self.select_index(self.current_index + delta)
 
+    def _reset_page_positions(self):
+        width = max(1, self.root.winfo_width())
+        for index, page in enumerate(self.pages):
+            page.place_configure(x=0 if index == self.current_index else width)
+        self.pages[self.current_index].lift()
+
+    def _draw_swipe(self, offset):
+        if self.shutting_down:
+            return
+        if offset == 0:
+            self._reset_page_positions()
+            return
+        width = max(1, self.root.winfo_width())
+        delta = 1 if offset <= 0 else -1
+        target = wrapped_index(self.current_index + delta, len(self.streams))
+        if target not in self.swipe_previews:
+            self.swipe_previews.add(target)
+            self._cancel_keep_alive(target)
+            self._render_page_snapshot(target)
+            with self.mpv_lock:
+                player = self.players.get(target)
+            if player and player['ready'] and not player.get('restart_required'):
+                self._reveal_video(target, player['proc'])
+            else:
+                threading.Thread(target=self._switch_worker,
+                                 args=(self.generation, target), daemon=True).start()
+        for index, page in enumerate(self.pages):
+            if index == self.current_index:
+                x = offset
+            elif index == target:
+                x = offset + delta * width
+            else:
+                x = width
+            page.place_configure(x=round(x))
+        self.pages[target].lift()
+        self.pages[self.current_index].lift()
+        self.name_labels[target].lift()
+        self._raise_overlays()
+
+    def _finish_swipe(self, delta):
+        previews = self.swipe_previews
+        self.swipe_previews = set()
+        if self.shutting_down:
+            return
+        if previews:
+            # A new selection generation invalidates any pending preview launch.
+            self.select_index(self.current_index + delta)
+            for index in previews:
+                if index != self.current_index:
+                    self._retire_stream(index)
+        else:
+            self._reset_cycle_timer()
+
     def select_index(self, index: int):
         if self.shutting_down:
             return
+        self.swipe.cancel()
         with self.mpv_lock:
             previous = self.current_index
             self.current_index = wrapped_index(index, len(self.streams))
@@ -443,6 +500,9 @@ class CarouselController:
         if previous != self.current_index:
             self._retire_stream(previous)
         self.video_host = self.video_hosts[self.current_index]
+        self.snapshot_label = self.snapshot_labels[self.current_index]
+        self.name_label = self.name_labels[self.current_index]
+        self._reset_page_positions()
         with self.mpv_lock:
             player = self.players.get(self.current_index)
             self.mpv_proc = player["proc"] if player else None
@@ -479,7 +539,7 @@ class CarouselController:
                 player = self.players.get(index)
                 reconnect = reconnect or bool(player and player.get("restart_required"))
                 player = self.players.pop(index, None) if reconnect else self.players.get(index)
-                if reconnect:
+                if reconnect and index == self.current_index:
                     self.mpv_proc = None
             if reconnect and player:
                 self._terminate_process(player["proc"])
@@ -506,7 +566,8 @@ class CarouselController:
         ).start()
 
     def _start_mpv(self, generation: int, index: int):
-        ipc_path = os.path.join(self.runtime_dir, f"mpv-{generation}.sock")
+        self.player_serial += 1
+        ipc_path = os.path.join(self.runtime_dir, f"mpv-{generation}-{self.player_serial}.sock")
         try:
             os.unlink(ipc_path)
         except OSError:
@@ -521,6 +582,8 @@ class CarouselController:
             wid=self.video_wids[index],
             ipc_path=ipc_path,
         )
+        if index != self.current_index:
+            cmd.append('--mute=yes')
         log.info(
             "Starting stream %d/%d '%s'",
             index + 1,
@@ -544,7 +607,8 @@ class CarouselController:
                 self.players[index] = {
                     "proc": proc, "ipc_path": ipc_path, "ready": False
                 }
-                self.mpv_proc = proc
+                if index == self.current_index:
+                    self.mpv_proc = proc
         if stale:
             self._terminate_process(proc)
             return
@@ -566,6 +630,10 @@ class CarouselController:
         self._queue_ui(self._apply_snapshot_update, index)
 
     def _apply_snapshot_update(self, index: int):
+        if not self.shutting_down and index in self.swipe_previews and index != self.current_index:
+            if not (self.streams[index].get('url') or '').strip():
+                self._render_page_snapshot(index)
+            return
         if self.shutting_down or index != self.current_index:
             return
         if not (self.streams[index].get("url") or "").strip():
@@ -729,7 +797,12 @@ class CarouselController:
                 return
             player["ready"] = True
         threading.Thread(target=self._sync_audio, daemon=True).start()
-        if self.shutting_down or index != self.current_index:
+        if self.shutting_down:
+            return
+        if index != self.current_index:
+            if index in self.swipe_previews:
+                self.video_hosts[index].lift(self.snapshot_labels[index])
+                self.name_labels[index].lift()
             return
         self.video_visible = True
         self.video_host.lift(self.snapshot_label)
@@ -809,7 +882,10 @@ class CarouselController:
                 log.warning("mpv pid=%d did not exit after SIGKILL", proc.pid)
 
     def _render_snapshot(self, raise_layer: bool):
-        path = self.snapshots.path_for(self.current_index)
+        self._render_page_snapshot(self.current_index, raise_layer)
+
+    def _render_page_snapshot(self, index, raise_layer=True):
+        path = self.snapshots.path_for(index)
         width = max(1, self.root.winfo_width())
         height = max(1, self.root.winfo_height())
         photo = None
@@ -818,19 +894,20 @@ class CarouselController:
                 with self.Image.open(path) as source:
                     source.load()
                     image = source.convert("RGB")
-                image = self._fit_snapshot(image, width, height)
+                image = self._fit_snapshot(image, width, height, index)
                 photo = self.ImageTk.PhotoImage(image)
             except Exception as exc:
                 log.warning("Could not render cached snapshot %s: %s", path, exc)
-        self.snapshot_photo = photo
-        self.snapshot_label.configure(image=photo or "", background="black")
+        self.snapshot_photos[index] = photo
+        label = self.snapshot_labels[index]
+        label.configure(image=photo or "", text="" if photo else self.streams[index]["name"], background="black")
         if raise_layer:
-            self.snapshot_label.lift()
+            label.lift()
             self._raise_overlays()
 
-    def _fit_snapshot(self, image, width: int, height: int):
+    def _fit_snapshot(self, image, width: int, height: int, index=None):
         fit = stream_playback_config(
-            self.pane, self.streams[self.current_index]
+            self.pane, self.streams[self.current_index if index is None else index]
         ).get("fit", "fill")
         resampling = getattr(self.Image, "Resampling", self.Image).LANCZOS
         if fit == "fill":
@@ -861,11 +938,11 @@ class CarouselController:
 
     def _update_name(self):
         position = stream_name_position(self.pane)
-        if position:
-            self.name_label.configure(text=self.streams[self.current_index]["name"])
-            self.name_label.place(**NAME_OVERLAY_PLACEMENTS[position])
-        else:
-            self.name_label.place_forget()
+        for label in self.name_labels:
+            if position:
+                label.place(**NAME_OVERLAY_PLACEMENTS[position])
+            else:
+                label.place_forget()
         self._raise_overlays()
 
     def _apply_overlay_layout(self):
@@ -881,7 +958,8 @@ class CarouselController:
         self.prev_button.configure(font=("DejaVu Sans", button_font, "bold"))
         self.next_button.configure(font=("DejaVu Sans", button_font, "bold"))
         # Tk uses negative font sizes to request exact pixel sizing.
-        self.name_label.configure(font=("DejaVu Sans", -name_font, "bold"))
+        for label in self.name_labels:
+            label.configure(font=("DejaVu Sans", -name_font, "bold"))
         if self.pane.get("show_controls") and len(self.streams) > 1:
             self.root.update_idletasks()
             root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
@@ -914,6 +992,10 @@ class CarouselController:
         if self.shutting_down or self.pointer_held:
             return
         self.pointer_held = True
+        if (_event is not None and self.pane.get("show_controls")
+                and len(self.streams) > 1
+                and _event.widget not in (self.prev_button, self.next_button)):
+            self.swipe.begin(_event.x_root, _event.y_root)
         self._update_selection_border()
         self._reset_cycle_timer()
         self._on_interaction()
@@ -923,8 +1005,18 @@ class CarouselController:
             return
         self.pointer_held = False
         self._update_selection_border()
+        if self.controls_after is not None:
+            self.root.after_cancel(self.controls_after)
+        self._dim_controls()
+        if self.swipe.tracking:
+            coords = ((_event.x_root, _event.y_root) if _event is not None
+                      else self.root.winfo_pointerxy())
+            self.swipe.release(*coords)
         self._reset_cycle_timer()
-        self._on_interaction()
+
+    def _on_pointer_motion(self, event):
+        if self.pointer_held:
+            self.swipe.move(event.x_root, event.y_root)
 
     def _update_selection_border(self):
         if not self.pointer_held or self.shutting_down:
@@ -976,6 +1068,8 @@ class CarouselController:
     def _on_configure(self, event):
         if event.widget is not self.root or self.shutting_down:
             return
+        self.swipe.cancel()
+        self._reset_page_positions()
         self._apply_overlay_layout()
         self._update_selection_border()
         self._render_snapshot(raise_layer=not self.video_visible)
@@ -991,7 +1085,7 @@ class CarouselController:
             except Exception:
                 pass
             self.cycle_after = None
-        if (not self.shutting_down and not self.pointer_held
+        if (not self.shutting_down and not self.pointer_held and not self.swipe.busy
                 and self.cycle_seconds > 0 and len(self.streams) > 1):
             generation = self.cycle_generation
             self.cycle_after = self.root.after(
@@ -1000,7 +1094,7 @@ class CarouselController:
             )
 
     def _advance_cycle(self, generation):
-        if (self.shutting_down or self.pointer_held
+        if (self.shutting_down or self.pointer_held or self.swipe.busy
                 or generation != self.cycle_generation):
             return
         self.cycle_after = None
@@ -1033,6 +1127,7 @@ class CarouselController:
         if self.shutting_down:
             return
         self.shutting_down = True
+        self.swipe.cancel()
         for timer in (self.controls_after, self.pointer_after):
             if timer is not None:
                 self.root.after_cancel(timer)

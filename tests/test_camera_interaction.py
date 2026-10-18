@@ -13,6 +13,9 @@ class HoldCycleTests(unittest.TestCase):
         c.root.after.side_effect = lambda delay, callback: (delay, callback)
         c.shutting_down = False
         c.pointer_held = False
+        c.swipe = mock.Mock(busy=False, tracking=False)
+        c.controls_after = None
+        c._dim_controls = mock.Mock()
         c.cycle_generation = 0
         c.cycle_after = None
         c.cycle_seconds = 2
@@ -46,6 +49,18 @@ class HoldCycleTests(unittest.TestCase):
         timer = c.cycle_after
         c._on_pointer_release()
         self.assertIs(c.cycle_after, timer)
+
+    def test_cycle_waits_until_swipe_animation_finishes(self):
+        c = self.c
+        stale = c.cycle_after[1]
+        c.swipe.busy = True
+        c._reset_cycle_timer()
+        self.assertIsNone(c.cycle_after)
+        stale()
+        c.navigate.assert_not_called()
+        c.swipe.busy = False
+        c._reset_cycle_timer()
+        self.assertEqual(c.cycle_after[0], 2000)
 
     def test_hold_is_local_to_one_carousel(self):
         first = self.c

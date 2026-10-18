@@ -168,6 +168,17 @@ mouse button, even outside the pane, starts a full cycle interval. Previous/next
 buttons still work manually. This also works with controls hidden and affects
 only the carousel where the press began. Pointer hovering or movement never
 selects a pane or brightens its controls, including after the last touch.
+The arrows return to 20% opacity immediately when the finger/button is released.
+
+When previous/next controls are enabled, drag horizontally on the video to page
+between cameras. Both pages follow the finger; releasing beyond 25% of the pane
+width or with a quick horizontal flick completes the transition. Short gestures
+animate back, and vertical gestures do not change cameras. Left advances, right
+goes back, and the ends wrap. Arrow buttons retain their normal click behavior.
+The incoming camera starts loading during the drag (muted until selected); its
+cached snapshot or name is shown while video connects. The automatic cycle
+restarts with a full interval after the transition finishes. Disabling controls
+also disables swiping, while hold-to-pause remains available.
 
 RTSP/stream and RTSP carousel panes accept `reconnect_minutes`, exposed as
 **Reconnect stream (min)** in the panel. Set a positive number of minutes
@@ -386,7 +397,7 @@ Carousel fields:
 | `snapshot_refresh_seconds` | Refresh every configured snapshot endpoint at this panel-wide frequency. Omit or use `0` to fetch each once at pane startup. | `0` |
 | `cycle_seconds` | Automatically advance and wrap after this many seconds. Manual navigation resets the timer. | `0` (off) |
 | `reconnect_minutes` | Maximum age of each RTSP connection, including hidden retained streams, without resetting navigation. Positive number; blank or omitted disables it. | off |
-| `show_controls` | Show previous/next buttons at 20% opacity, rising to 100% for 3 seconds after touch, click, wheel, or keyboard interaction with the pane. | `false` |
+| `show_controls` | Enable previous/next buttons and interactive horizontal swipe. Buttons brighten while pressed and return to 20% immediately on release; wheel/keyboard interaction brightens them for 3 seconds. | `false` |
 | `stream_name_position` | Camera-name overlay location: `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, or `bottom-right`. Omit to hide it. | hidden |
 | `stream_name_font_size` | Camera-name overlay font size in pixels. Omit for responsive sizing. | automatic |
 

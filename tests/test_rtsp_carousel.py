@@ -367,6 +367,7 @@ class SnapshotOnlyControllerTests(unittest.TestCase):
         controller.switch_lock = mock.MagicMock()
         controller._stop_mpv = mock.Mock()
         controller._sync_audio = mock.Mock()
+        controller.swipe_previews = set()
         controller._start_mpv = mock.Mock()
         controller.shutting_down = False
         controller.generation = 1
@@ -382,6 +383,7 @@ class SnapshotOnlyControllerTests(unittest.TestCase):
     def test_snapshot_refresh_updates_visible_snapshot_only_entry(self):
         controller = object.__new__(CarouselController)
         controller.shutting_down = False
+        controller.swipe_previews = set()
         controller.current_index = 0
         controller.video_visible = True
         controller.streams = [
@@ -400,6 +402,7 @@ class PlaybackWatchdogTests(unittest.TestCase):
         controller = object.__new__(CarouselController)
         controller.pane = {"reconnect_minutes": reconnect_minutes}
         controller.shutting_down = False
+        controller.swipe_previews = set()
         controller._queue_ui = mock.Mock()
         proc = mock.Mock()
         proc.poll.return_value = None
@@ -463,6 +466,8 @@ class KeepAliveControllerTests(unittest.TestCase):
         c.generation = 1
         c.shutting_down = False
         c.pointer_held = False
+        c.swipe = mock.Mock(busy=False, tracking=False)
+        c.swipe_previews = set()
         c.cycle_generation = 0
         c.mpv_lock = threading.Lock()
         c.switch_lock = threading.Lock()
@@ -473,6 +478,9 @@ class KeepAliveControllerTests(unittest.TestCase):
         c.video_hosts = [mock.Mock(), mock.Mock()]
         c.video_host = c.video_hosts[0]
         c.snapshot_label = mock.Mock()
+        c.snapshot_labels = [c.snapshot_label, mock.Mock()]
+        c.name_labels = [mock.Mock(), mock.Mock()]
+        c._reset_page_positions = mock.Mock()
         c._render_snapshot = mock.Mock()
         c._update_name = mock.Mock()
         c._cancel_retry = mock.Mock()
@@ -485,6 +493,22 @@ class KeepAliveControllerTests(unittest.TestCase):
         self.proc = mock.Mock()
         self.proc.poll.return_value = None
         c.players = {0: {"proc": self.proc, "ipc_path": "/tmp/fake", "ready": True}}
+
+    @mock.patch("rtsp_carousel.threading.Thread")
+    def test_cancelled_swipe_invalidates_pending_launch_and_retires_preview(self, thread):
+        c = self.controller
+        preview = mock.Mock()
+        c.players[1] = {"proc": preview, "ipc_path": "/tmp/preview", "ready": False}
+        c.swipe_previews = {1}
+        previous_generation = c.generation
+        c._finish_swipe(0)
+        self.assertEqual(c.current_index, 0)
+        self.assertGreater(c.generation, previous_generation)
+        self.assertNotIn(1, c.players)
+        self.assertIs(c.players[0]["proc"], self.proc)
+        self.assertEqual(c.swipe_previews, set())
+        c._switch_worker(previous_generation, 1)
+        c._start_mpv.assert_not_called()
 
     @mock.patch("rtsp_carousel.threading.Thread")
     def test_navigation_retains_player_and_return_reuses_it(self, thread):
@@ -682,6 +706,8 @@ class ButtonOpacityTests(unittest.TestCase):
         c.controls_after = None
         c.shutting_down = False
         c.pointer_held = False
+        c.swipe = mock.Mock(busy=False, tracking=False)
+        c.swipe_previews = set()
         c.cycle_generation = 0
 
     def test_interaction_brightens_only_buttons_and_resets_three_second_timer(self):
