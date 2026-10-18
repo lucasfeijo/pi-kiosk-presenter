@@ -182,6 +182,8 @@ also disables swiping, while hold-to-pause remains available.
 
 Tap the camera title enabled by **Camera name location** to open a vertical
 camera list centered in that pane, using the title's font, size, and colors.
+The current camera is highlighted in blue. The pane title stays hidden while
+the list is open and returns to its configured position when the list closes.
 Tap a camera to jump directly to it and close the list. The automatic cycle
 pauses while the list is open and restarts with a full interval when it closes.
 The list closes after 5 seconds without interaction; hovering does not extend

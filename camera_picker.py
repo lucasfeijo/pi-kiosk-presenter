@@ -13,7 +13,7 @@ class CameraPicker:
     def is_open(self):
         return self.window is not None
 
-    def show(self, title, names):
+    def show(self, title, names, selected_index):
         if self.is_open:
             return
         tk = self.tk
@@ -30,9 +30,10 @@ class CameraPicker:
         self.content = tk.Frame(self.canvas, background=background)
         self.content_id = self.canvas.create_window(0, 0, anchor="nw", window=self.content)
         self.rows = []
-        for name in names:
+        for index, name in enumerate(names):
             row = tk.Label(self.content, text=name, font=title.cget("font"),
-                           background=background, foreground=title.cget("foreground"),
+                           background="#60a5fa" if index == selected_index else background,
+                           foreground="#111827" if index == selected_index else title.cget("foreground"),
                            borderwidth=0, padx=title.cget("padx"), pady=title.cget("pady"))
             row.pack(fill="x")
             self.rows.append(row)

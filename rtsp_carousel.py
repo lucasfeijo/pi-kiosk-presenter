@@ -942,7 +942,7 @@ class CarouselController:
     def _update_name(self):
         position = stream_name_position(self.pane)
         for label in self.name_labels:
-            if position:
+            if position and not self.picker.is_open:
                 label.place(**NAME_OVERLAY_PLACEMENTS[position])
             else:
                 label.place_forget()
@@ -986,7 +986,7 @@ class CarouselController:
     def _raise_overlays(self):
         if self.pointer_held:
             self.selection_window.lift(self.root)
-        if stream_name_position(self.pane):
+        if stream_name_position(self.pane) and not self.picker.is_open:
             self.name_label.lift()
         if self.picker.is_open:
             self.picker.window.lift(self.root)
@@ -1027,7 +1027,8 @@ class CarouselController:
             if (max(abs(coords[0] - x), abs(coords[1] - y)) < 12
                     and label.winfo_rootx() <= coords[0] < label.winfo_rootx() + label.winfo_width()
                     and label.winfo_rooty() <= coords[1] < label.winfo_rooty() + label.winfo_height()):
-                self.picker.show(self.name_label, [s["name"] for s in self.streams])
+                self.picker.show(self.name_label, [s["name"] for s in self.streams],
+                                 self.current_index)
                 self._apply_overlay_layout()
         self._reset_cycle_timer()
 
