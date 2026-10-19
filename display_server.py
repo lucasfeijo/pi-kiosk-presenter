@@ -1897,7 +1897,15 @@ h1{{font-size:1.3rem;margin:0;color:#58a6ff;line-height:1.6}}
 @media(max-width:900px){{.top{{flex-direction:column}}}}
 .preview-wrap{{flex:1;min-width:0}}
 .sidebar{{width:clamp(540px,56vw,1040px);flex-shrink:0;min-width:0}}
-@media(max-width:900px){{.sidebar,.preview-wrap{{width:100%}}}}
+.editor-splitter{{align-self:stretch;flex:0 0 12px;padding:0;border:0;background:transparent;
+  cursor:col-resize;touch-action:none;position:relative}}
+.editor-splitter::before{{content:"";position:absolute;top:0;bottom:0;left:5px;width:2px;
+  border-radius:2px;background:#30363d}}
+.editor-splitter:hover::before,.editor-splitter:focus-visible::before,
+.editor-splitter.dragging::before{{background:#58a6ff}}
+.editor-splitter:focus-visible{{outline:2px solid #58a6ff;outline-offset:2px;border-radius:4px}}
+body.resizing-editor,body.resizing-editor *{{cursor:col-resize!important;user-select:none!important}}
+@media(max-width:900px){{.sidebar,.preview-wrap{{width:100%}}.editor-splitter{{display:none}}}}
 .card-header{{display:flex;align-items:center;justify-content:space-between;margin:0 0 10px}}
 .card-header h2{{margin:0}}
 .icon-btn{{background:#30363d;color:#e6edf3;border:none;border-radius:6px;width:26px;height:26px;
@@ -2076,6 +2084,9 @@ label.inline input{{width:auto}}
   </div>
 
 </div>
+<button class="editor-splitter" id="editor-splitter" type="button" role="separator"
+  aria-label="Resize current design and properties" aria-orientation="vertical"
+  aria-valuemin="0" aria-valuemax="100" title="Drag to resize the editor columns; use arrow keys for fine adjustment"></button>
 <div class="sidebar">
   <div class="card">
     <h2>Panes</h2>
@@ -2271,6 +2282,79 @@ function initPreview() {{
   preview.dataset.scale = w / SCREEN_W;
 }}
 
+const editorTop = document.querySelector(".top");
+const editorSidebar = document.querySelector(".sidebar");
+const editorSplitter = document.getElementById("editor-splitter");
+const editorSplitKey = "pi-display-editor-sidebar-ratio";
+let editorSidebarRatio = null;
+try {{
+  const saved = Number(localStorage.getItem(editorSplitKey));
+  if (saved > 0 && saved < 1) editorSidebarRatio = saved;
+}} catch (e) {{}}
+
+function editorSplitBounds() {{
+  const available = editorTop.clientWidth - editorSplitter.offsetWidth - 32;
+  return {{available, min:420, max:available - 280}};
+}}
+
+function updateEditorSplit(width, save = false) {{
+  if (window.innerWidth <= 900) return;
+  const {{available, min, max}} = editorSplitBounds();
+  const sidebarWidth = Math.max(min, Math.min(max, width));
+  editorSidebar.style.width = sidebarWidth + "px";
+  editorSplitter.setAttribute("aria-valuenow", String(Math.round(100 * (available - sidebarWidth) / available)));
+  editorSplitter.setAttribute("aria-valuetext", "Current design " + Math.round(available - sidebarWidth) +
+    " pixels; panes and properties " + Math.round(sidebarWidth) + " pixels");
+  if (save) {{
+    editorSidebarRatio = sidebarWidth / available;
+    try {{ localStorage.setItem(editorSplitKey, String(editorSidebarRatio)); }} catch (e) {{}}
+  }}
+  initPreview();
+  updatePreviewPaneGeometry();
+}}
+
+function restoreEditorSplit() {{
+  if (window.innerWidth <= 900) {{ editorSidebar.style.width = ""; return; }}
+  if (editorSidebarRatio === null) editorSidebar.style.width = "";
+  const {{available}} = editorSplitBounds();
+  const preferred = editorSidebarRatio === null ? editorSidebar.getBoundingClientRect().width : editorSidebarRatio * available;
+  updateEditorSplit(preferred);
+}}
+
+let editorSplitDrag = null;
+editorSplitter.addEventListener("pointerdown", event => {{
+  if (event.button !== 0 || window.innerWidth <= 900) return;
+  event.preventDefault();
+  editorSplitDrag = event.pointerId;
+  editorSplitter.setPointerCapture(event.pointerId);
+  editorSplitter.classList.add("dragging");
+  document.body.classList.add("resizing-editor");
+}});
+editorSplitter.addEventListener("pointermove", event => {{
+  if (event.pointerId !== editorSplitDrag) return;
+  updateEditorSplit(editorTop.getBoundingClientRect().right - event.clientX - 22);
+}});
+function finishEditorSplit(event) {{
+  if (event.pointerId !== editorSplitDrag) return;
+  if (event.type === "pointerup") {{
+    updateEditorSplit(editorTop.getBoundingClientRect().right - event.clientX - 22, true);
+  }} else {{
+    restoreEditorSplit();
+  }}
+  editorSplitDrag = null;
+  editorSplitter.classList.remove("dragging");
+  document.body.classList.remove("resizing-editor");
+  if (editorSplitter.hasPointerCapture(event.pointerId)) editorSplitter.releasePointerCapture(event.pointerId);
+}}
+editorSplitter.addEventListener("pointerup", finishEditorSplit);
+editorSplitter.addEventListener("pointercancel", finishEditorSplit);
+editorSplitter.addEventListener("lostpointercapture", finishEditorSplit);
+editorSplitter.addEventListener("keydown", event => {{
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  updateEditorSplit(editorSidebar.getBoundingClientRect().width + (event.key === "ArrowLeft" ? 32 : -32), true);
+}});
+
 function invalidateLiveView(message = "Design changed — refreshing live view…") {{
   liveGeneration++;
   if (liveController) liveController.abort();
@@ -2386,6 +2470,18 @@ function resumeLiveView() {{
     refreshLiveView();
   }}
   refreshStatus();
+}}
+
+function updatePreviewPaneGeometry() {{
+  const scale = parseFloat(preview.dataset.scale);
+  preview.querySelectorAll(".pane-rect").forEach(el => {{
+    const p = layout[Number(el.dataset.idx)];
+    if (!p) return;
+    el.style.left = ((p.x || 0) * SCREEN_W * scale) + "px";
+    el.style.top = ((p.y || 0) * SCREEN_H * scale) + "px";
+    el.style.width = ((p.w || 1) * SCREEN_W * scale) + "px";
+    el.style.height = ((p.h || 1) * SCREEN_H * scale) + "px";
+  }});
 }}
 
 function render() {{
@@ -3375,7 +3471,7 @@ function renderProcTable() {{
   }}).join("");
 }}
 
-window.addEventListener("resize", () => {{ initPreview(); render(); }});
+window.addEventListener("resize", () => {{ restoreEditorSplit(); initPreview(); render(); }});
 preview.addEventListener("mousedown", onPreviewMouseDown);
 document.addEventListener("visibilitychange", () => {{
   if (document.hidden) {{
@@ -3394,6 +3490,7 @@ document.getElementById("props-card").addEventListener("change", () => {{
 }});
 window.addEventListener("focus", resumeLiveView);
 window.addEventListener("pageshow", resumeLiveView);
+restoreEditorSplit();
 initPreview();
 render();
 renderProcTable();

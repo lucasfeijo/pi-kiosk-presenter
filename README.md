@@ -252,7 +252,7 @@ Open `http://<pi-ip>:8686/` in a browser to use the visual editor:
 
 - **Current Design** — drag panes to move them, drag corner handles to resize. The design overlays a fresh live capture only when it matches the applied layout.
 - **Automatic live view** — panel edits immediately hide the capture. Applying, restarting, clearing, or detecting display changes fetches a new capture after the panel windows are ready. Captures refresh every two minutes while visible and when returning to the tab; drafts that differ from the display stay in design-only mode. The Live View button also refreshes manually.
-- **Sidebar** — click a pane to edit its properties in a wider, three-column layout. Carousel streams appear side by side when space allows.
+- **Sidebar** — click a pane to edit its properties. Drag the vertical divider between Current Design and Panes/Properties to set their widths, or focus it and use the arrow keys. The width is saved in this browser; on narrow screens the sections stack. Carousel streams appear side by side when space allows.
 - **Saved Designs** — open the top-bar link to select, rename, duplicate, or create a saved design. Selecting or creating a design closes the modal and opens it for editing.
 - **Running Panes** — click the link before the CPU stats in the top bar to open process statistics in a modal; close it with Close, Escape, or a click outside.
 - **RTSP carousel editor** — add, remove, reorder, and configure named streams, snapshots, controls, and timing
