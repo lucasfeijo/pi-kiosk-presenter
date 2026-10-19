@@ -149,6 +149,9 @@ def validate_rtsp_carousel_pane(pane: dict):
             stream.get("snapshot_refresh_seconds"),
             f"rtsp_carousel streams[{index}].snapshot_refresh_seconds",
         )
+        _optional_nonnegative_number(
+            stream.get("cycle_seconds"), f"rtsp_carousel streams[{index}].cycle_seconds"
+        )
         if "keep_alive_seconds" in stream:
             seconds = stream["keep_alive_seconds"]
             if type(seconds) is not int or seconds <= 0:
@@ -2025,6 +2028,10 @@ label.inline input{{width:auto}}
 .stream-row-head{{display:flex;align-items:center;justify-content:space-between;gap:8px;
   color:#e6edf3;font-size:12px;font-weight:600}}
 .stream-row-actions{{display:flex;gap:4px}}
+.stream-drag-handle{{touch-action:none;cursor:grab;user-select:none;padding:3px 7px;background:#30363d;color:#e6edf3}}
+.stream-row-head>span{{flex:1}}
+.stream-row.dragging{{opacity:.5}}
+.stream-row.drop-target{{outline:2px solid #58a6ff;outline-offset:2px}}
 .stream-row-actions button{{padding:2px 7px;font-size:11px;background:#30363d;color:#e6edf3}}
 .stream-row-actions button.danger{{background:#da3633;color:#fff}}
 .stream-row input,.stream-row select,.stream-row textarea{{font-size:12px;padding:5px 7px}}
@@ -2123,8 +2130,6 @@ label.inline input{{width:auto}}
       <label class="props-wide" style="margin-top:0">Streams</label>
       <div id="p-streams"></div>
       <button class="btn-secondary btn-sm props-wide" style="width:100%" onclick="addCarouselStream()">+ Add Stream</button>
-      <div class="property-field"><label title="Advance to the next stream every N seconds. Blank or 0 disables automatic cycling.">Auto-cycle (sec)</label>
-      <input id="p-cycle-seconds" type="number" step="1" min="0" onchange="updateCarouselSeconds('cycle_seconds',this.value)"></div>
       <label class="inline"><input type="checkbox" id="p-show-controls" onchange="updateCarouselBool('show_controls',this.checked)"> Show previous / next controls</label>
       <div class="property-field"><label>Camera name location</label>
       <select id="p-stream-name-position" onchange="updateCarouselOption('stream_name_position',this.value)">
@@ -2608,7 +2613,6 @@ function showProps() {{
     if (!p.stream_name_position && p.show_stream_name) p.stream_name_position = "top";
     delete p.show_stream_name;
     renderCarouselStreams(p);
-    document.getElementById("p-cycle-seconds").value = p.cycle_seconds || "";
     document.getElementById("p-show-controls").checked = !!p.show_controls;
     document.getElementById("p-stream-name-position").value = p.stream_name_position || "";
     document.getElementById("p-stream-name-font-size").value = p.stream_name_font_size || "";
@@ -2658,7 +2662,7 @@ function updatePaneType(val) {{
   render();
 }}
 
-const CAROUSEL_STREAM_OPTION_KEYS = ["fit", "hwdec", "rtsp_transport", "audio", "mpv_args", "snapshot_refresh_seconds"];
+const CAROUSEL_STREAM_OPTION_KEYS = ["fit", "hwdec", "rtsp_transport", "audio", "mpv_args", "snapshot_refresh_seconds", "cycle_seconds"];
 const streamAdvancedOpen = new WeakMap();
 
 function migrateCarouselStreamOptions(p) {{
@@ -2680,6 +2684,7 @@ function renderCarouselStreams(p) {{
   (p.streams || []).forEach((stream, index) => {{
     const row = document.createElement("div");
     row.className = "stream-row";
+    row.dataset.streamIndex = index;
     const head = document.createElement("div");
     head.className = "stream-row-head";
     const title = document.createElement("span");
@@ -2699,6 +2704,14 @@ function renderCarouselStreams(p) {{
       button.onclick = spec[1];
       actions.appendChild(button);
     }});
+    const handle = document.createElement("button");
+    handle.type = "button";
+    handle.className = "stream-drag-handle";
+    handle.textContent = "\u283f";
+    handle.title = "Drag to reorder";
+    handle.setAttribute("aria-label", "Drag to reorder stream " + (index + 1));
+    bindStreamDrag(handle, row, p, stream);
+    head.appendChild(handle);
     head.appendChild(title);
     head.appendChild(actions);
     row.appendChild(head);
@@ -2730,6 +2743,24 @@ function renderCarouselStreams(p) {{
     }};
     refreshLabel.appendChild(refreshInput);
     row.appendChild(refreshLabel);
+
+    const cycleLabel = document.createElement("label");
+    cycleLabel.textContent = "Auto-cycle (sec)";
+    cycleLabel.title = "Time to show this camera before advancing. Blank or 0 holds it until manual navigation.";
+    const cycleInput = document.createElement("input");
+    cycleInput.type = "number";
+    cycleInput.min = "0";
+    cycleInput.step = "any";
+    cycleInput.placeholder = "manual navigation";
+    cycleInput.value = stream.cycle_seconds ?? "";
+    cycleInput.onchange = () => {{
+      if (!cycleInput.value) updateCarouselStream(index, "cycle_seconds", null);
+      else if (cycleInput.checkValidity() && Number.isFinite(Number(cycleInput.value)))
+        updateCarouselStream(index, "cycle_seconds", Number(cycleInput.value));
+      else cycleInput.reportValidity();
+    }};
+    cycleLabel.appendChild(cycleInput);
+    row.appendChild(cycleLabel);
 
     const advanced = document.createElement("details");
     advanced.className = "advanced-options";
@@ -2817,12 +2848,69 @@ function removeCarouselStream(index) {{
 }}
 
 function moveCarouselStream(index, delta) {{
+  reorderCarouselStream(index, index + delta);
+}}
+
+function reorderCarouselStream(index, next) {{
   if (selectedIdx < 0) return;
   const streams = layout[selectedIdx].streams || [];
-  const next = index + delta;
-  if (next < 0 || next >= streams.length) return;
-  [streams[index], streams[next]] = [streams[next], streams[index]];
+  if (index < 0 || index >= streams.length || next < 0 || next >= streams.length || index === next) return;
+  streams.splice(next, 0, streams.splice(index, 1)[0]);
   render();
+}}
+
+function bindStreamDrag(handle, row, pane, stream) {{
+  let drag = null;
+  function finish(commit) {{
+    if (!drag) return;
+    const state = drag;
+    drag = null;
+    cancelAnimationFrame(state.frame);
+    if (handle.hasPointerCapture(state.id)) handle.releasePointerCapture(state.id);
+    row.classList.remove("dragging");
+    document.querySelectorAll(".stream-row.drop-target").forEach(el => el.classList.remove("drop-target"));
+    if (commit && state.moved && layout[selectedIdx] === pane && pane.streams === state.streams)
+      reorderCarouselStream(pane.streams.indexOf(stream), state.target);
+  }}
+  function frame() {{
+    if (!drag) return;
+    if (!row.isConnected || layout[selectedIdx] !== pane) {{ finish(false); return; }}
+    if (drag.moved) {{
+      const speed = drag.y < 60 ? -12 : drag.y > innerHeight - 60 ? 12 : 0;
+      if (speed) window.scrollBy(0, speed);
+      updateTarget();
+    }}
+    drag.frame = requestAnimationFrame(frame);
+  }}
+  function updateTarget() {{
+    const target = document.elementFromPoint(drag.x, drag.y)?.closest(".stream-row");
+    const valid = target && target.parentElement === row.parentElement;
+    drag.target = valid ? Number(target.dataset.streamIndex) : -1;
+    document.querySelectorAll(".stream-row.drop-target").forEach(el => el.classList.remove("drop-target"));
+    if (valid && target !== row) target.classList.add("drop-target");
+  }}
+  handle.onpointerdown = event => {{
+    if (event.button !== 0 || drag) return;
+    event.preventDefault();
+    drag = {{id:event.pointerId, startX:event.clientX, startY:event.clientY,
+      x:event.clientX, y:event.clientY, target:-1, moved:false, streams:pane.streams}};
+    handle.setPointerCapture(event.pointerId);
+    drag.frame = requestAnimationFrame(frame);
+  }};
+  handle.onpointermove = event => {{
+    if (!drag || event.pointerId !== drag.id) return;
+    drag.x = event.clientX; drag.y = event.clientY;
+    if (Math.hypot(drag.x - drag.startX, drag.y - drag.startY) >= 6) drag.moved = true;
+    row.classList.toggle("dragging", drag.moved);
+  }};
+  handle.onpointerup = event => {{
+    if (drag && event.pointerId === drag.id) {{
+      drag.x = event.clientX; drag.y = event.clientY;
+      updateTarget();
+      finish(true);
+    }}
+  }};
+  handle.onpointercancel = handle.onlostpointercapture = () => finish(false);
 }}
 
 function updateCarouselStream(index, key, value) {{
@@ -2832,7 +2920,7 @@ function updateCarouselStream(index, key, value) {{
   if ((key === "url" || key === "snapshot_url" || key === "hwdec" || key === "rtsp_transport") && !value) delete stream[key];
   else if (key === "audio" && !value) delete stream[key];
   else if (key === "mpv_args" && (!Array.isArray(value) || !value.length)) delete stream[key];
-  else if ((key === "keep_alive_seconds" || key === "snapshot_refresh_seconds") && value === null) delete stream[key];
+  else if (["keep_alive_seconds", "snapshot_refresh_seconds", "cycle_seconds"].includes(key) && value === null) delete stream[key];
   else stream[key] = value;
   syncJson();
   persistScreens();

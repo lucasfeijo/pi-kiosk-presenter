@@ -379,6 +379,7 @@ curl -X POST http://pi:8686/pane \
         "url": "rtsp://192.168.1.101/live",
         "snapshot_url": "http://192.168.1.101/snapshot.jpg",
         "snapshot_refresh_seconds": 10,
+        "cycle_seconds": 5,
         "fit": "cover",
         "hwdec": "v4l2m2m-copy",
         "rtsp_transport": "tcp",
@@ -389,6 +390,7 @@ curl -X POST http://pi:8686/pane \
         "url": "rtsp://192.168.1.102/live",
         "snapshot_url": "http://192.168.1.102/snapshot.jpg",
         "snapshot_refresh_seconds": 30,
+        "cycle_seconds": 15,
         "fit": "contain",
         "hwdec": "drm-copy",
         "mpv_args": ["--framedrop=yes"]
@@ -397,7 +399,6 @@ curl -X POST http://pi:8686/pane \
     "show_controls": true,
     "stream_name_position": "top",
     "stream_name_font_size": 24,
-    "cycle_seconds": 30,
     "x": 0, "y": 0, "w": 1.0, "h": 1.0
   }'
 ```
@@ -407,7 +408,6 @@ Carousel fields:
 | Field | Purpose | Default |
 |-------|---------|---------|
 | `streams` | Non-empty array of stream objects. A name and at least one of `url` or `snapshot_url` are required. | required |
-| `cycle_seconds` | Automatically advance and wrap after this many seconds. Manual navigation resets the timer. | `0` (off) |
 | `reconnect_minutes` | Maximum age of each RTSP connection, including hidden retained streams, without resetting navigation. Positive number; blank or omitted disables it. | off |
 | `show_controls` | Enable previous/next buttons and interactive horizontal swipe. Buttons brighten while pressed and return to 20% immediately on release; wheel/keyboard interaction brightens them for 3 seconds. | `false` |
 | `stream_name_position` | Camera-name overlay location: `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, or `bottom-right`. Omit to hide it. | hidden |
@@ -425,6 +425,7 @@ Stream fields:
 | `url` | RTSP URL. Optional for snapshot-only entries. | — |
 | `snapshot_url` | HTTP/HTTPS image displayed before playback or for snapshot-only entries. | — |
 | `snapshot_refresh_seconds` | Refresh this snapshot every N seconds. Blank or `0` fetches once at startup. | `0` |
+| `cycle_seconds` | Time to display this stream before advancing. Blank or `0` holds it until manual navigation. Navigation or release after holding starts its full interval. | `0` (manual) |
 | `fit` | `fill`, `cover`, or `contain`, applied to this stream's video and snapshot. | `fill` |
 | `hwdec` | MPV hardware decoder for this stream, such as `v4l2m2m-copy` or `drm-copy`. | server default |
 | `rtsp_transport` | `tcp` or `udp` for this stream. | server default |
@@ -432,11 +433,15 @@ Stream fields:
 | `keep_alive_seconds` | Positive integer seconds to keep this stream active after it leaves the screen. Omit to disable. | off |
 | `mpv_args` | Additional MPV arguments for this stream. | `[]` |
 
+Drag a stream by its dotted handle to drop it into another position, using a
+mouse or touch. The up/down buttons remain available. Order and per-stream
+settings are saved together. Each stream has its own **Auto-cycle (sec)** field.
+
 The editor keeps hwdec, RTSP transport, keep alive, audio, and MPV arguments
 in an **Advanced** section, closed by default. Snapshot refresh and Fit stay visible.
 
-Legacy carousel definitions with playback fields or `snapshot_refresh_seconds`
-at pane level remain loadable. A stream-specific interval overrides the legacy
+Legacy carousel definitions with playback fields, `cycle_seconds`, or `snapshot_refresh_seconds`
+at pane level remain loadable. A stream-specific interval overrides its legacy
 interval, including an explicit `0`. The editor migrates the old interval into
 each stream without overwriting explicit values. Snapshot downloads
 run in the background and never delay RTSP startup. Failed refreshes retain the

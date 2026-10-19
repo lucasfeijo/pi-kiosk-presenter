@@ -21,6 +21,7 @@ class HoldCycleTests(unittest.TestCase):
         c.cycle_generation = 0
         c.cycle_after = None
         c.cycle_seconds = 2
+        c.current_index = 0
         c.streams = [{}, {}]
         c._on_interaction = mock.Mock()
         c._update_selection_border = mock.Mock()
@@ -42,6 +43,30 @@ class HoldCycleTests(unittest.TestCase):
         c.navigate.assert_not_called()
         c.cycle_after[1]()
         c.navigate.assert_called_once_with(1)
+
+    def test_selected_stream_duration_overrides_legacy_timer(self):
+        c = self.c
+        c.streams = [{"cycle_seconds": 3}, {"cycle_seconds": 7.5}]
+        c._reset_cycle_timer()
+        stale = c.cycle_after[1]
+        self.assertEqual(c.cycle_after[0], 3000)
+        c.current_index = 1
+        c._reset_cycle_timer()
+        self.assertEqual(c.cycle_after[0], 7500)
+        stale()
+        c.navigate.assert_not_called()
+        c._on_pointer_press()
+        c._on_pointer_release()
+        self.assertEqual(c.cycle_after[0], 7500)
+
+    def test_zero_holds_stream_and_missing_duration_uses_legacy_interval(self):
+        c = self.c
+        c.streams = [{"cycle_seconds": 0}, {}]
+        c._reset_cycle_timer()
+        self.assertIsNone(c.cycle_after)
+        c.current_index = 1
+        c._reset_cycle_timer()
+        self.assertEqual(c.cycle_after[0], 2000)
 
     def test_repeated_events_do_not_reset_release_timer(self):
         c = self.c

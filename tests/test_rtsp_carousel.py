@@ -161,6 +161,16 @@ class CarouselValidationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 validate_rtsp_carousel_pane(pane)
 
+    def test_cycle_duration_accepts_independent_finite_nonnegative_values(self):
+        pane = carousel_pane(cycle_seconds=10)
+        for value in (0, 1, 2.5, None, ""):
+            pane["streams"][0]["cycle_seconds"] = value
+            validate_rtsp_carousel_pane(pane)
+        for value in (-1, True, "invalid", float('nan'), float('inf')):
+            pane["streams"][0]["cycle_seconds"] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_rtsp_carousel_pane(pane)
+
     def test_rejects_invalid_per_stream_playback_settings(self):
         invalid_settings = (
             {"fit": "stretch"},
@@ -987,7 +997,7 @@ class EditorHtmlTests(unittest.TestCase):
             'option value="rtsp_carousel"',
             'id="p-streams"',
             'stream.snapshot_refresh_seconds',
-            'id="p-cycle-seconds"',
+            'stream.cycle_seconds',
             'id="p-reconnect-minutes"',
             'id="p-show-controls"',
             'id="p-stream-name-position"',

@@ -1128,12 +1128,14 @@ class CarouselController:
             except Exception:
                 pass
             self.cycle_after = None
+        seconds = max(0.0, float(self.streams[self.current_index].get(
+            "cycle_seconds", self.cycle_seconds) or 0))
         if (not self.shutting_down and not self.pointer_held and not self.swipe.busy
                 and not self.picker.is_open
-                and self.cycle_seconds > 0 and len(self.streams) > 1):
+                and seconds > 0 and len(self.streams) > 1):
             generation = self.cycle_generation
             self.cycle_after = self.root.after(
-                int(self.cycle_seconds * 1000),
+                max(1, int(seconds * 1000)),
                 lambda: self._advance_cycle(generation),
             )
 
