@@ -32,6 +32,7 @@ sudo apt-get install -y -qq \
     conky-std \
     fonts-dejavu \
     python3 \
+    python3-paho-mqtt \
     python3-pil.imagetk
 
 # --- Clone repo ------------------------------------------------------------

@@ -15,9 +15,12 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 from carousel_swipe import SwipeGesture
+from carousel_control import CarouselControl, MAX_FOCUS_SECONDS
 from camera_picker import CameraPicker
 
 from display_server import (
@@ -312,8 +315,18 @@ def configure_carousel_window(root, pane: dict, geom: tuple[int, int, int, int])
     root.minsize(1, 1)
 
 
+@dataclass
+class CameraFocus:
+    previous_index: int
+    until: str
+    after: Optional[str] = None
+
+
 class CarouselController:
     """Own the pane window, mpv children for visible and retained streams, overlays, and timers."""
+
+    control: Optional[CarouselControl] = None
+    focus: Optional[CameraFocus] = None
 
     def __init__(self, config: dict):
         import tkinter as tk
@@ -327,6 +340,10 @@ class CarouselController:
         validate_rtsp_carousel_pane(self.pane)
         self.streams = self.pane["streams"]
         self.runtime_dir = config["runtime_dir"]
+        if config.get("control_enabled"):
+            self.control = CarouselControl(self.runtime_dir)
+            self.camera_indices = {stream["id"]: index for index, stream in enumerate(self.streams)}
+            self.focus_requests: dict[str, None] = {}
         self.watchdog_interval = max(
             1.0, float(config.get("watchdog_interval", 10) or 10)
         )
@@ -441,6 +458,8 @@ class CarouselController:
         self.snapshots.start()
         self._apply_overlay_layout()
         self.select_index(0)
+        if self.control is not None:
+            self.control.start()
         self._poll_pointer()
         self.root.after(50, self._drain_ui_queue)
         self.root.mainloop()
@@ -448,6 +467,7 @@ class CarouselController:
     def navigate(self, delta: int):
         if len(self.streams) < 2:
             return
+        self._cancel_focus()
         self.select_index(self.current_index + delta)
 
     def _reset_page_positions(self):
@@ -496,6 +516,8 @@ class CarouselController:
             return
         if previews:
             # A new selection generation invalidates any pending preview launch.
+            if delta:
+                self._cancel_focus()
             self.select_index(self.current_index + delta)
             for index in previews:
                 if index != self.current_index:
@@ -537,6 +559,86 @@ class CarouselController:
             name=f"carousel-switch-{generation}",
         )
         thread.start()
+        self._publish_control_state()
+
+    def _publish_control_state(self):
+        if self.control is None or self.shutting_down:
+            return
+        stream = self.streams[self.current_index]
+        if self.video_visible:
+            picture = "live"
+        elif self.snapshot_photos.get(self.current_index) is not None:
+            picture = "snapshot"
+        elif (stream.get("url") or "").strip():
+            picture = "connecting"
+        else:
+            picture = "no_image"
+        self.control.publish({
+            "type": "state",
+            "camera_id": stream["id"],
+            "picture": picture,
+            "focus_until": self.focus.until if self.focus is not None else None,
+        })
+
+    def _local_selection_busy(self):
+        return self.pointer_held or self.swipe.busy or self.picker.is_open
+
+    def _apply_control_command(self, command):
+        action = command.get("action")
+        camera_id = command.get("camera_id")
+        if self.shutting_down or not isinstance(camera_id, str):
+            return
+        index = self.camera_indices.get(camera_id)
+        if index is None:
+            return
+        if action == "focus":
+            duration = command.get("duration_seconds")
+            request_id = command.get("request_id")
+            if (not isinstance(duration, (int, float)) or isinstance(duration, bool)
+                    or not 0 < duration <= MAX_FOCUS_SECONDS
+                    or not isinstance(request_id, str) or not 0 < len(request_id) <= 128
+                    or request_id in self.focus_requests):
+                return
+            # A QoS 1 redelivery must not prolong the focus or retry a busy pane.
+            self.focus_requests[request_id] = None
+            if len(self.focus_requests) > 256:
+                self.focus_requests.pop(next(iter(self.focus_requests)))
+            if self._local_selection_busy():
+                return
+            previous = self.focus.previous_index if self.focus is not None else self.current_index
+            self._cancel_focus()
+            until = datetime.now(timezone.utc) + timedelta(seconds=duration)
+            focus = self.focus = CameraFocus(previous, until.isoformat())
+            focus.after = self.root.after(
+                max(1, math.ceil(duration * 1000)), lambda: self._expire_focus(focus)
+            )
+        elif action == "select" and not self._local_selection_busy():
+            self._cancel_focus()
+        else:
+            return
+        self._select_or_reset_cycle(index)
+
+    def _select_or_reset_cycle(self, index):
+        if index != self.current_index:
+            self.select_index(index)
+        else:
+            self._reset_cycle_timer()
+            self._publish_control_state()
+
+    def _cancel_focus(self):
+        focus, self.focus = self.focus, None
+        if focus is not None and focus.after is not None:
+            self.root.after_cancel(focus.after)
+
+    def _expire_focus(self, focus):
+        if self.shutting_down or self.focus is not focus:
+            return
+        if self._local_selection_busy():
+            # Let a touch complete before moving the page out from under it.
+            focus.after = self.root.after(100, lambda: self._expire_focus(focus))
+            return
+        self.focus = None
+        self._select_or_reset_cycle(focus.previous_index)
 
     def _switch_worker(self, generation: int, index: int, reconnect: bool = False):
         with self.switch_lock:
@@ -574,6 +676,7 @@ class CarouselController:
         self._cancel_retry()
         self.video_visible = False
         self._render_snapshot(raise_layer=True)
+        self._publish_control_state()
         threading.Thread(
             target=self._switch_worker,
             args=(generation, index, True),
@@ -655,6 +758,7 @@ class CarouselController:
         if not (self.streams[index].get("url") or "").strip():
             self.video_visible = False
             self._render_snapshot(raise_layer=True)
+            self._publish_control_state()
 
     def _watch_ipc(
         self,
@@ -780,6 +884,7 @@ class CarouselController:
         log.warning("Active mpv exited with code %s; retaining snapshot", return_code)
         self.video_visible = False
         self._render_snapshot(raise_layer=True)
+        self._publish_control_state()
         self._schedule_retry(self.generation)
 
     def _handle_start_failure(self, generation: int):
@@ -823,6 +928,7 @@ class CarouselController:
         self.video_visible = True
         self.video_host.lift(self.snapshot_label)
         self._raise_overlays()
+        self._publish_control_state()
 
     def _sync_audio(self):
         # Hidden streams keep decoding, but only the selected camera is audible.
@@ -1057,6 +1163,7 @@ class CarouselController:
         if self.shutting_down:
             return
         if index is not None:
+            self._cancel_focus()
             self.select_index(index)
         self._apply_overlay_layout()
         self._reset_cycle_timer()
@@ -1119,6 +1226,7 @@ class CarouselController:
         if self.video_visible:
             self.video_host.lift(self.snapshot_label)
             self._raise_overlays()
+        self._publish_control_state()
 
     def _reset_cycle_timer(self):
         self.cycle_generation += 1
@@ -1130,8 +1238,7 @@ class CarouselController:
             self.cycle_after = None
         seconds = max(0.0, float(self.streams[self.current_index].get(
             "cycle_seconds", self.cycle_seconds) or 0))
-        if (not self.shutting_down and not self.pointer_held and not self.swipe.busy
-                and not self.picker.is_open
+        if (not self.shutting_down and self.focus is None and not self._local_selection_busy()
                 and seconds > 0 and len(self.streams) > 1):
             generation = self.cycle_generation
             self.cycle_after = self.root.after(
@@ -1140,7 +1247,7 @@ class CarouselController:
             )
 
     def _advance_cycle(self, generation):
-        if (self.shutting_down or self.pointer_held or self.swipe.busy or self.picker.is_open
+        if (self.shutting_down or self.focus is not None or self._local_selection_busy()
                 or generation != self.cycle_generation):
             return
         self.cycle_after = None
@@ -1167,12 +1274,18 @@ class CarouselController:
             except queue.Empty:
                 break
             callback(*args)
+        if self.control is not None:
+            for command in self.control.pending_commands():
+                self._apply_control_command(command)
         self.root.after(50, self._drain_ui_queue)
 
     def shutdown(self):
         if self.shutting_down:
             return
         self.shutting_down = True
+        if self.control is not None:
+            self.control.stop()
+        self._cancel_focus()
         self.picker.close(notify=False)
         self.swipe.cancel()
         for timer in (self.controls_after, self.pointer_after):

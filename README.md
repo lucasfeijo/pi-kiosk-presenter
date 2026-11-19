@@ -465,6 +465,111 @@ Optional pane fields:
 | `rtsp_transport` | `tcp` or `udp` (UDP can reduce latency on a wired LAN). |
 | `audio` | Set `true` if you need sound; default skips audio for lower CPU use. |
 
+## Home Assistant
+
+MQTT Discovery groups the active `rtsp_carousel` panes under one Home Assistant
+device. Each pane has a `select` with the camera options in carousel order. Use
+`select.select_previous`, `select.select_next`, or `select.select_option` in a
+dashboard or automation. The Pi reports selections made by the touchscreen,
+automatic cycling, and Home Assistant. The select's `picture` attribute indicates
+whether the camera is live, showing a snapshot, connecting, or has no image.
+
+### Connect the Pi to the broker
+
+Enable the Home Assistant MQTT integration and connect it to a broker the Pi can
+reach on the private network. The install and update scripts install the Paho
+client. On an existing Pi, install `python3-paho-mqtt` if needed and update the
+unit file before configuring the service. The unit reads the optional
+`/etc/pi-display-server/mqtt.env`. Create that file with permissions `0600`, set
+the broker and a unique ID for this display, and restart `pi-display-server`.
+
+```ini
+DISPLAY_MQTT_HOST=mqtt.example.local
+DISPLAY_MQTT_ID=display_pai
+DISPLAY_MQTT_NAME="Display do pai"
+DISPLAY_MQTT_USERNAME=display_pai
+DISPLAY_MQTT_PASSWORD=replace-with-the-broker-password
+```
+
+| Setting | Default |
+| --- | --- |
+| `DISPLAY_MQTT_HOST` | Unset. MQTT is disabled. |
+| `DISPLAY_MQTT_ID` | `pi-display`. Use a different ID for each display, with letters, digits, hyphens, or underscores. |
+| `DISPLAY_MQTT_NAME` | `Pi Display` |
+| `DISPLAY_MQTT_PORT` | `1883`, or `8883` with TLS |
+| `DISPLAY_MQTT_USERNAME` and `DISPLAY_MQTT_PASSWORD` | Unset. Use the credentials assigned to the Pi. |
+| `DISPLAY_MQTT_TLS` | `false`. Set to `true` for a TLS listener. |
+| `DISPLAY_MQTT_CA_FILE` | System trust store. Set a path for a private CA. |
+| `DISPLAY_MQTT_DISCOVERY_PREFIX` | `homeassistant`. Match the discovery prefix in Home Assistant. |
+| `DISPLAY_MQTT_BIRTH_TOPIC` | `homeassistant/status`. Match the Home Assistant MQTT birth topic if customized. |
+
+The Pi publishes discovery to `homeassistant/device/<display_id>/config`, and
+publishes state and availability under `pi-display/<display_id>/`. If your
+broker uses topic ACLs, give the Pi read and write access to its discovery topic,
+read access to `homeassistant/status` and `pi-display/<display_id>/+/set` and
+`pi-display/<display_id>/+/focus`, and write access to its state and availability
+topics. The carousel keeps running if the broker is unreachable. A pane becomes
+available after its controller reports a selection.
+
+### Focus a camera temporarily
+
+A regular `select` action switches the camera and starts its normal rotation
+interval. A focus command holds a camera for a set time, then restores the
+camera that was selected before the focus and restarts its normal interval.
+A new focus request renews the timer. A manual selection cancels the focus.
+
+For an automation driven by a motion sensor, create a Home Assistant script
+with the YAML below. Pass the target `select` entity, the camera option as shown
+in its dropdown, and a duration in seconds.
+
+```yaml
+alias: Focus a display camera
+mode: parallel
+fields:
+  panel:
+    name: Panel
+    required: true
+    selector:
+      entity:
+        filter:
+          - domain: select
+            integration: mqtt
+  camera:
+    name: Camera option
+    required: true
+    selector:
+      text:
+  duration:
+    name: Duration
+    required: true
+    selector:
+      number:
+        min: 1
+        max: 3600
+        unit_of_measurement: s
+sequence:
+  - variables:
+      topic: "{{ state_attr(panel, 'focus_topic') }}"
+      camera_id: "{{ (state_attr(panel, 'camera_ids') or {}).get(camera) }}"
+  - if:
+      - condition: template
+        value_template: "{{ not has_value(panel) or not topic or not camera_id }}"
+    then:
+      - stop: The display panel is unavailable or the camera is not in its options.
+        error: true
+  - action: mqtt.publish
+    data:
+      topic: "{{ topic }}"
+      qos: 1
+      retain: false
+      payload: >-
+        {{ {'camera_id': camera_id, 'duration_seconds': duration | float,
+            'request_id': now().isoformat(), 'issued_at': as_timestamp(now())} | to_json }}
+```
+
+The Pi uses its local timer for the return to the previous camera. Keep both
+hosts' clocks synchronized so the Pi can reject delayed focus requests.
+
 ## Configuration
 
 Environment variables (set in the systemd service or export before running):

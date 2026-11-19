@@ -11,6 +11,7 @@ Environment=XAUTHORITY=/home/pi/.Xauthority
 Environment=DISPLAY_PORT=8686
 # Set to 0 to disable HTTPS and use plain HTTP instead:
 Environment=SSL_SELFSIGNED=1
+EnvironmentFile=-/etc/pi-display-server/mqtt.env
 ExecStart=/bin/bash -lc 'for i in $(seq 1 30); do for d in :0 :1 :2; do if DISPLAY="$d" XAUTHORITY="/home/pi/.Xauthority" xdpyinfo >/dev/null 2>&1; then export DISPLAY="$d"; exec /usr/bin/python3 /opt/pi-display-server/display_server.py; fi; done; sleep 2; done; echo "No X display available" >&2; exit 1'
 Restart=on-failure
 RestartSec=1

@@ -8,6 +8,8 @@ windows accordingly (mpv for RTSP/video, chromium for web, feh for images, etc.)
 Requires: Python 3.9+, xdotool, xdpyinfo, mpv, chromium, feh, Tk, Pillow
 """
 
+from __future__ import annotations
+
 import ctypes
 import json
 import logging
@@ -22,10 +24,15 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Event, Lock, RLock, Thread
 from typing import Optional
+from uuid import uuid4
+
+from carousel_control import CONTROL_SOCKET_NAME
+from display_mqtt import MQTTBridge, Panel
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,6 +81,19 @@ STREAM_NAME_POSITIONS = (
     "bottom",
     "bottom-right",
 )
+CAROUSEL_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _validate_carousel_id(item: dict, field_name: str):
+    if "id" not in item:
+        return
+    value = item["id"]
+    if not _is_carousel_id(value):
+        raise ValueError(f"{field_name} must contain 1–64 letters, digits, underscores or hyphens")
+
+
+def _is_carousel_id(value):
+    return isinstance(value, str) and CAROUSEL_ID_PATTERN.fullmatch(value) is not None
 
 
 def _optional_nonnegative_number(value, field_name: str):
@@ -120,12 +140,19 @@ def validate_rtsp_carousel_pane(pane: dict):
     if pane.get("type") != RTSP_CAROUSEL_TYPE:
         return
 
+    _validate_carousel_id(pane, "rtsp_carousel id")
     streams = pane.get("streams")
     if not isinstance(streams, list) or not streams:
         raise ValueError("rtsp_carousel streams must be a non-empty array")
+    stream_ids = set()
     for index, stream in enumerate(streams):
         if not isinstance(stream, dict):
             raise ValueError(f"rtsp_carousel streams[{index}] must be an object")
+        _validate_carousel_id(stream, f"rtsp_carousel streams[{index}].id")
+        if "id" in stream:
+            if stream["id"] in stream_ids:
+                raise ValueError("rtsp_carousel stream IDs must be unique within a panel")
+            stream_ids.add(stream["id"])
         name = stream.get("name")
         if not isinstance(name, str) or not name.strip():
             raise ValueError(
@@ -209,11 +236,12 @@ def validate_rtsp_carousel_pane(pane: dict):
         raise ValueError("mpv_args must be an array of strings")
 
 
-def validate_carousels_in_layout(layout: list[dict]):
+def validate_carousels_in_layout(layout: list[dict], panel_ids=()):
     """Preflight special panes before a layout can disturb live panes."""
     if not isinstance(layout, list):
         raise ValueError("layout must be an array")
     airplay_count = 0
+    seen_ids = set(panel_ids)
     for index, pane in enumerate(layout):
         if not isinstance(pane, dict):
             raise ValueError(f"pane[{index}] must be an object")
@@ -221,6 +249,10 @@ def validate_carousels_in_layout(layout: list[dict]):
             validate_rtsp_carousel_pane(pane)
         except ValueError as exc:
             raise ValueError(f"pane[{index}]: {exc}") from None
+        if pane.get("type") == RTSP_CAROUSEL_TYPE and "id" in pane:
+            if pane["id"] in seen_ids:
+                raise ValueError("rtsp_carousel panel IDs must be unique across screens")
+            seen_ids.add(pane["id"])
         if pane.get("type") == AIRPLAY_TYPE:
             airplay_count += 1
             device_name = pane.get("device_name", "AirPlay Pi")
@@ -229,6 +261,70 @@ def validate_carousels_in_layout(layout: list[dict]):
                 raise ValueError(f"pane[{index}]: device_name must be 1–80 printable characters")
     if airplay_count > 1:
         raise ValueError("only one airplay pane is supported per screen")
+
+
+def _carousel_panel_ids(layout):
+    return {
+        p["id"]
+        for p in layout
+        if isinstance(p, dict) and p.get("type") == RTSP_CAROUSEL_TYPE
+        and isinstance(p.get("id"), str)
+    }
+
+
+def _pane_name(pane):
+    return pane.get("name", pane.get("type", ""))
+
+
+def _prepare_carousel_layout(layout, previous=(), other_panel_ids=()):
+    """Validate a submitted layout and assign IDs before saving or launching it."""
+    validate_carousels_in_layout(layout, other_panel_ids)
+    used_ids = _carousel_panel_ids(layout) | set(other_panel_ids)
+    old_by_name = {
+        _pane_name(pane): pane
+        for pane in previous
+        if isinstance(pane, dict) and pane.get("type") == RTSP_CAROUSEL_TYPE
+        and isinstance(_pane_name(pane), str)
+    }
+    old_by_id = {
+        pane["id"]: pane for pane in old_by_name.values() if _is_carousel_id(pane.get("id"))
+    }
+    prepared = []
+    for pane in layout:
+        if pane.get("type") != RTSP_CAROUSEL_TYPE:
+            prepared.append(pane)
+            continue
+        pane = dict(pane)
+        if "id" in pane:
+            old_pane = old_by_id.get(pane["id"], {})
+        else:
+            old_pane = old_by_name.get(_pane_name(pane), {})
+            old_id = old_pane.get("id")
+            pane["id"] = old_id if _is_carousel_id(old_id) and old_id not in used_ids else uuid4().hex
+            used_ids.add(pane["id"])
+        old_streams = old_pane.get("streams")
+        old_streams = [
+            stream for stream in old_streams
+            if isinstance(stream, dict) and isinstance(stream.get("name"), str)
+        ] if isinstance(old_streams, list) else []
+        old_names = Counter(stream["name"] for stream in old_streams)
+        new_names = Counter(stream["name"] for stream in pane["streams"])
+        old_stream_ids = {
+            stream["name"]: stream["id"]
+            for stream in old_streams
+            if old_names[stream["name"]] == new_names[stream["name"]] == 1
+            and _is_carousel_id(stream.get("id"))
+        }
+        streams = [dict(stream) for stream in pane["streams"]]
+        used_stream_ids = {stream["id"] for stream in streams if "id" in stream}
+        for stream in streams:
+            if "id" not in stream:
+                old_id = old_stream_ids.get(stream["name"])
+                stream["id"] = old_id if old_id and old_id not in used_stream_ids else uuid4().hex
+                used_stream_ids.add(stream["id"])
+        pane["streams"] = streams
+        prepared.append(pane)
+    return prepared
 
 
 def _chromium_user_data_dir(pane: dict) -> str:
@@ -789,6 +885,7 @@ class ManagedPane:
     wid: Optional[int] = None
     process_group: bool = False
     runtime_dir: Optional[str] = field(default=None, repr=False)
+    carousel_id: Optional[str] = None
     _refresh_stop: Optional[Event] = field(default=None, repr=False)
     _refresh_thread: Optional[Thread] = field(default=None, repr=False)
     _airplay_stop: Optional[Event] = field(default=None, repr=False)
@@ -807,6 +904,7 @@ class DisplayManager:
             "screens": [{"name": "Default", "panes": []}],
             "playingIndex": 0,
         }
+        self._mqtt_enabled = bool(os.environ.get("DISPLAY_MQTT_HOST", "").strip())
         self._stop_event = Event()
         self._input_pattern = re.compile(INPUT_DEVICE_PATTERN, flags=re.IGNORECASE)
         self._input_matrix = _rotation_to_matrix(INPUT_ROTATION)
@@ -849,30 +947,44 @@ class DisplayManager:
         except Exception as e:
             log.warning("Failed to save screens: %s", e)
 
-    def set_screens_doc(self, doc: dict):
-        """Replace the in-memory screens document (autosave path). Does not touch live panes."""
+    def _prepare_screens_doc(self, doc: dict, *, restoring=False):
         if not isinstance(doc, dict):
             raise ValueError("screens doc must be an object")
         screens = doc.get("screens")
         if not isinstance(screens, list) or not screens:
             raise ValueError("screens must be a non-empty array")
+        playing = doc.get("playingIndex", 0)
+        if restoring and isinstance(playing, str) and playing.isdecimal():
+            playing = int(playing)
+        if not isinstance(playing, int) or playing < 0 or playing >= len(screens):
+            playing = 0
         normalized = []
+        panel_ids = set()
+        previous = {s["name"]: s["panes"] for s in self._screens_doc["screens"]}
         for i, scr in enumerate(screens):
             if not isinstance(scr, dict):
                 raise ValueError(f"screen[{i}] must be an object")
             panes = scr.get("panes", [])
+            if restoring and panes is None:
+                panes = []
             if not isinstance(panes, list):
                 raise ValueError(f"screen[{i}].panes must be an array")
+            name = str(scr.get("name") or f"Screen {i+1}")
             try:
-                validate_carousels_in_layout(panes)
+                panes = _prepare_carousel_layout(panes, previous.get(name, ()), panel_ids)
             except ValueError as exc:
-                raise ValueError(f"screen[{i}]: {exc}") from None
-            normalized.append({"name": str(scr.get("name") or f"Screen {i+1}"), "panes": panes})
-        playing = doc.get("playingIndex", 0)
-        if not isinstance(playing, int) or playing < 0 or playing >= len(normalized):
-            playing = 0
+                if not restoring:
+                    raise ValueError(f"screen[{i}]: {exc}") from None
+                # Old files may contain unfinished drafts. Keep them editable;
+                # apply_layout will validate an individual screen before playing it.
+            panel_ids.update(_carousel_panel_ids(panes))
+            normalized.append({"name": name, "panes": panes})
+        return {"screens": normalized, "playingIndex": playing}
+
+    def set_screens_doc(self, doc: dict):
+        """Replace the in-memory screens document (autosave path). Does not touch live panes."""
         with self.lock:
-            self._screens_doc = {"screens": normalized, "playingIndex": playing}
+            self._screens_doc = self._prepare_screens_doc(doc)
             try:
                 with open(LAYOUT_FILE, "w") as f:
                     json.dump(self._screens_doc, f, indent=2)
@@ -885,9 +997,14 @@ class DisplayManager:
             screens = self._screens_doc.get("screens") or []
             if index < 0 or index >= len(screens):
                 raise ValueError(f"playingIndex {index} out of range")
+            previous_index = self._screens_doc["playingIndex"]
             self._screens_doc["playingIndex"] = index
             panes = list(screens[index].get("panes") or [])
-        self.apply_layout(panes)
+            try:
+                self.apply_layout(panes)
+            except ValueError:
+                self._screens_doc["playingIndex"] = previous_index
+                raise
 
     def load_saved_layout(self):
         """Load the saved screens doc; auto-migrate from legacy flat-list format."""
@@ -901,31 +1018,20 @@ class DisplayManager:
             log.warning("Failed to read %s: %s", LAYOUT_FILE, e)
             return
 
-        if isinstance(data, list):
+        legacy = isinstance(data, list)
+        if legacy:
             log.info("Migrating legacy layout.json (%d panes) into screens format", len(data))
-            self._screens_doc = {
+            data = {
                 "screens": [{"name": "Default", "panes": data}],
                 "playingIndex": 0,
             }
-            try:
-                with open(LAYOUT_FILE, "w") as f:
-                    json.dump(self._screens_doc, f, indent=2)
-            except Exception as e:
-                log.warning("Failed to rewrite migrated layout: %s", e)
-        elif isinstance(data, dict) and isinstance(data.get("screens"), list) and data["screens"]:
-            self._screens_doc = {
-                "screens": [
-                    {"name": str(s.get("name") or f"Screen {i+1}"), "panes": list(s.get("panes") or [])}
-                    for i, s in enumerate(data["screens"])
-                ],
-                "playingIndex": int(data.get("playingIndex", 0) or 0),
-            }
-            if self._screens_doc["playingIndex"] >= len(self._screens_doc["screens"]):
-                self._screens_doc["playingIndex"] = 0
-        else:
-            log.warning("Unrecognized layout.json shape; starting fresh")
+        try:
+            restored = self._prepare_screens_doc(data, restoring=True)
+        except ValueError as exc:
+            log.error("Saved layout validation failed; panes were not started: %s", exc)
             return
 
+        self._screens_doc = restored
         idx = self._screens_doc["playingIndex"]
         panes = list(self._screens_doc["screens"][idx].get("panes") or [])
         if panes:
@@ -935,6 +1041,18 @@ class DisplayManager:
                 self.apply_layout(panes)
             except ValueError as exc:
                 log.error("Saved layout validation failed; panes were not started: %s", exc)
+        elif legacy or restored != data:
+            self._save_layout()
+
+    def _other_carousel_panel_ids(self):
+        screens_doc = getattr(self, "_screens_doc", {})
+        active = screens_doc.get("playingIndex", 0)
+        return {
+            panel_id
+            for index, screen in enumerate(screens_doc.get("screens", ()))
+            if index != active
+            for panel_id in _carousel_panel_ids(screen["panes"])
+        }
 
     # -- launchers ----------------------------------------------------------
 
@@ -964,6 +1082,7 @@ class DisplayManager:
             "geom": list(geom),
             "runtime_dir": runtime_dir,
             "watchdog_interval": WATCHDOG_INTERVAL,
+            "control_enabled": self._mqtt_enabled,
         }
         try:
             with open(config_path, "w") as f:
@@ -1153,8 +1272,10 @@ class DisplayManager:
         processes at once and positions windows in background threads so
         the HTTP response returns immediately.
         """
-        validate_carousels_in_layout(layout)
         with self.lock:
+            layout = _prepare_carousel_layout(
+                layout, self._current_layout, self._other_carousel_panel_ids()
+            )
             self._kill_all()
             self._current_layout = layout
             launched: list[tuple[dict, str, subprocess.Popen, tuple]] = []
@@ -1168,7 +1289,7 @@ class DisplayManager:
                         continue
                     geom = resolve_region(pane, self.screen_w, self.screen_h)
                     proc = launcher(self, pane, geom)
-                    self.panes[name] = self._make_managed_pane(name, ptype, proc)
+                    self.panes[name] = self._make_managed_pane(pane, proc)
                     launched.append((pane, name, proc, geom))
                 except Exception:
                     log.exception("Failed to launch pane '%s'",
@@ -1315,13 +1436,14 @@ class DisplayManager:
         """Add a single pane without disturbing existing ones."""
         validate_rtsp_carousel_pane(pane)
         with self.lock:
-            candidate = [p for p in self._current_layout
-                         if p.get("name", p.get("type", "")) != pane.get("name", pane.get("type", ""))]
-            validate_carousels_in_layout([*candidate, pane])
+            name = _pane_name(pane)
+            candidate = [p for p in self._current_layout if _pane_name(p) != name]
+            pane = _prepare_carousel_layout(
+                [*candidate, pane], self._current_layout, self._other_carousel_panel_ids()
+            )[-1]
             # Update stored layout: replace existing pane with same name or append
-            name = pane.get("name", pane.get("type", ""))
             for index, current in enumerate(self._current_layout):
-                if current.get("name", current.get("type", "")) == name:
+                if _pane_name(current) == name:
                     self._current_layout[index] = pane
                     break
             else:
@@ -1456,16 +1578,39 @@ class DisplayManager:
 
     # -- internals ----------------------------------------------------------
 
+    def mqtt_panels(self) -> Optional[tuple[Panel, ...]]:
+        """Snapshot the applied carousels without holding up MQTT during a layout change."""
+        if not self.lock.acquire(blocking=False):
+            return None
+        try:
+            panels = []
+            for pane in self._current_layout:
+                if pane.get("type") != RTSP_CAROUSEL_TYPE:
+                    continue
+                name = _pane_name(pane)
+                managed = self.panes.get(name) if isinstance(name, str) else None
+                label = name if isinstance(name, str) and name.strip() else "Camera panel"
+                path = None
+                if (managed and managed.carousel_id == pane["id"] and managed.runtime_dir
+                        and managed.proc.poll() is None):
+                    path = os.path.join(managed.runtime_dir, CONTROL_SOCKET_NAME)
+                cameras = tuple((stream["id"], stream["name"]) for stream in pane["streams"])
+                panels.append(Panel(pane["id"], label, path, cameras))
+            return tuple(panels)
+        finally:
+            self.lock.release()
+
     @staticmethod
-    def _make_managed_pane(
-        name: str, ptype: str, proc: subprocess.Popen
-    ) -> ManagedPane:
+    def _make_managed_pane(pane: dict, proc: subprocess.Popen) -> ManagedPane:
+        ptype = pane["type"]
+        carousel = ptype == RTSP_CAROUSEL_TYPE
         return ManagedPane(
-            name=name,
+            name=_pane_name(pane),
             ptype=ptype,
             proc=proc,
-            process_group=(ptype == RTSP_CAROUSEL_TYPE),
+            process_group=carousel,
             runtime_dir=getattr(proc, "_pi_runtime_dir", None),
+            carousel_id=pane.get("id") if carousel else None,
         )
 
     def _add_pane(self, pane: dict):
@@ -1485,7 +1630,7 @@ class DisplayManager:
 
         geom = resolve_region(pane, self.screen_w, self.screen_h)
         proc = launcher(self, pane, geom)
-        self.panes[name] = self._make_managed_pane(name, ptype, proc)
+        self.panes[name] = self._make_managed_pane(pane, proc)
         self._position_pane(pane, name, proc, geom)
         raise_window_stack(self._current_layout, self.panes)
 
@@ -2225,6 +2370,24 @@ let selectedIdx = -1;
 let dragState = null;
 let persistTimer = null;
 
+function createCarouselId() {{
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
+}}
+
+function assignCarouselIds(pane, regenerate = false) {{
+  if (pane?.type !== "rtsp_carousel" &&
+      !(regenerate && pane?.id && Array.isArray(pane.streams))) return;
+  if (regenerate || pane.id === undefined) pane.id = createCarouselId();
+  if (Array.isArray(pane.streams)) {{
+    pane.streams.forEach(stream => {{
+      if (stream && typeof stream === "object" && (regenerate || stream.id === undefined)) {{
+        stream.id = createCarouselId();
+      }}
+    }});
+  }}
+}}
+
 function persistScreens() {{
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {{
@@ -2583,6 +2746,7 @@ function duplicateCurrentScreen() {{
   if (!cur) return;
   const copy = JSON.parse(JSON.stringify(cur));
   copy.name = (cur.name || "Screen") + " copy";
+  copy.panes.forEach(pane => assignCarouselIds(pane, true));
   screensDoc.screens.push(copy);
   editingIdx = screensDoc.screens.length - 1;
   layout = screensDoc.screens[editingIdx].panes;
@@ -2754,7 +2918,10 @@ function updatePaneType(val) {{
     p.streams = [first];
     delete p.url;
   }}
-  if (val === "rtsp_carousel") migrateCarouselStreamOptions(p);
+  if (val === "rtsp_carousel") {{
+    assignCarouselIds(p);
+    migrateCarouselStreamOptions(p);
+  }}
   render();
 }}
 
@@ -2932,7 +3099,7 @@ function addCarouselStream() {{
   if (selectedIdx < 0) return;
   const p = layout[selectedIdx];
   if (!Array.isArray(p.streams)) p.streams = [];
-  p.streams.push({{name: "Camera " + (p.streams.length + 1)}});
+  p.streams.push({{id: createCarouselId(), name: "Camera " + (p.streams.length + 1)}});
   render();
 }}
 
@@ -3248,6 +3415,7 @@ function loadFromJson() {{
   try {{
     const parsed = JSON.parse(document.getElementById("raw-json").value);
     if (!Array.isArray(parsed)) throw new Error("Expected an array of panes");
+    parsed.forEach(pane => assignCarouselIds(pane));
     layout.length = 0;
     parsed.forEach(p => layout.push(p));
     selectedIdx = -1;
@@ -3732,10 +3900,22 @@ def main():
     else:
         log.info("Pi Display Server listening on http://%s:%d", host, port)
 
-    # Graceful shutdown
-    def _shutdown(sig, frame):
+    bridge = MQTTBridge.start_from_env(dm.mqtt_panels)
+
+    def _shutdown(_sig, _frame):
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    try:
+        server.serve_forever()
+    finally:
         log.info("Shutting down…")
+        server.server_close()
         dm.stop_watchdog()
+        if bridge is not None:
+            bridge.stop()
         dm._kill_all()
         compositor = dm.carousel_compositor
         if compositor and compositor.poll() is None:
@@ -3745,16 +3925,6 @@ def main():
             except subprocess.TimeoutExpired:
                 compositor.kill()
                 compositor.wait()
-        server.shutdown()
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
-
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        _shutdown(None, None)
 
 
 if __name__ == "__main__":

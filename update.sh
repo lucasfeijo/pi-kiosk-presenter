@@ -45,6 +45,12 @@ if ! python3 -c 'import tkinter; from PIL import Image, ImageTk' >/dev/null 2>&1
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-pil.imagetk
 fi
 
+if ! /usr/bin/python3 -c 'import paho.mqtt.client' >/dev/null 2>&1; then
+    echo "Missing MQTT client dependency. Installing…"
+    sudo apt-get update -qq
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-paho-mqtt
+fi
+
 if ! diff -q "${INSTALL_DIR}/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.service" >/dev/null 2>&1; then
     echo "Service file changed, updating…"
     sudo cp "${INSTALL_DIR}/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.service"

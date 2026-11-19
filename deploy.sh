@@ -61,6 +61,11 @@ ssh "${PI_HOST}" "set -e
       sudo apt-get update -qq
       sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-pil.imagetk
     fi
+    if ! /usr/bin/python3 -c 'import paho.mqtt.client' >/dev/null 2>&1; then
+      echo 'Installing MQTT client dependency…'
+      sudo apt-get update -qq
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-paho-mqtt
+    fi
     sudo rm -rf ${REMOTE_DIR}
     sudo git clone ${REPO_URL} ${REMOTE_DIR}
     sudo chmod +x ${REMOTE_DIR}/update.sh
