@@ -33,6 +33,7 @@ from uuid import uuid4
 
 from carousel_control import CONTROL_SOCKET_NAME
 from display_mqtt import MQTTBridge, Panel
+from display_relay import CAMERA_API_PATH, CameraRelay, camera_api_token_from_env, serve_camera_request
 
 logging.basicConfig(
     level=logging.INFO,
@@ -894,7 +895,7 @@ class ManagedPane:
 class DisplayManager:
     """Keeps track of all running panes and their processes."""
 
-    def __init__(self):
+    def __init__(self, *, control_enabled=False):
         self.panes: dict[str, ManagedPane] = {}
         self.carousel_compositor = None
         self.lock = RLock()
@@ -904,7 +905,7 @@ class DisplayManager:
             "screens": [{"name": "Default", "panes": []}],
             "playingIndex": 0,
         }
-        self._mqtt_enabled = bool(os.environ.get("DISPLAY_MQTT_HOST", "").strip())
+        self._control_enabled = control_enabled
         self._stop_event = Event()
         self._input_pattern = re.compile(INPUT_DEVICE_PATTERN, flags=re.IGNORECASE)
         self._input_matrix = _rotation_to_matrix(INPUT_ROTATION)
@@ -1082,7 +1083,7 @@ class DisplayManager:
             "geom": list(geom),
             "runtime_dir": runtime_dir,
             "watchdog_interval": WATCHDOG_INTERVAL,
-            "control_enabled": self._mqtt_enabled,
+            "control_enabled": self._control_enabled,
         }
         try:
             with open(config_path, "w") as f:
@@ -1919,6 +1920,7 @@ class Handler(BaseHTTPRequestHandler):
     GET  /screenshot.jpg — JPEG screenshot of the live X display
     GET  /status         — current state
     GET  /health         — simple health check
+    GET/POST /api/home-assistant/cameras — optional authenticated HTTPS camera relay
     """
 
     def _send_json(self, data: dict, code: int = 200):
@@ -1957,6 +1959,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/":
             self._serve_index()
+        elif path == CAMERA_API_PATH:
+            serve_camera_request(self, getattr(self.server, "camera_relay", None), write=False)
         elif path == "/stats":
             self._serve_stats()
         elif path == "/status":
@@ -3789,6 +3793,9 @@ setInterval(refresh, 3000);
     # --- POST --------------------------------------------------------------
 
     def do_POST(self):
+        if self.path == CAMERA_API_PATH:
+            serve_camera_request(self, getattr(self.server, "camera_relay", None), write=True)
+            return
         try:
             if self.path == "/layout":
                 layout = self._read_json()
@@ -3881,26 +3888,37 @@ def main():
     if "DISPLAY" not in os.environ:
         os.environ["DISPLAY"] = ":0"
 
-    dm = DisplayManager()
-    dm.load_saved_layout()
-
-    server = HTTPServer((host, port), Handler)
-
     # -- optional HTTPS --
     cert = os.environ.get("SSL_CERT")
     key = os.environ.get("SSL_KEY")
     auto_ssl = os.environ.get("SSL_SELFSIGNED", "").lower() in ("1", "true", "yes")
     if auto_ssl and not (cert and key):
         cert, key = _ensure_selfsigned_cert()
+    ctx = None
     if cert and key:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(cert, key)
+
+    direct_mqtt = bool(os.environ.get("DISPLAY_MQTT_HOST", "").strip())
+    relay_token = camera_api_token_from_env(
+        tls_enabled=ctx is not None, direct_mqtt_enabled=direct_mqtt
+    )
+    dm = DisplayManager(control_enabled=direct_mqtt or relay_token is not None)
+    dm.load_saved_layout()
+
+    server = HTTPServer((host, port), Handler)
+    if ctx is not None:
         server.socket = ctx.wrap_socket(server.socket, server_side=True)
         log.info("Pi Display Server listening on https://%s:%d (cert=%s)", host, port, cert)
     else:
         log.info("Pi Display Server listening on http://%s:%d", host, port)
 
     bridge = MQTTBridge.start_from_env(dm.mqtt_panels)
+    relay = None
+    if relay_token is not None:
+        relay = CameraRelay(relay_token, dm.mqtt_panels)
+        relay.start()
+        server.camera_relay = relay
 
     def _shutdown(_sig, _frame):
         raise SystemExit(0)
@@ -3916,6 +3934,8 @@ def main():
         dm.stop_watchdog()
         if bridge is not None:
             bridge.stop()
+        if relay is not None:
+            relay.stop()
         dm._kill_all()
         compositor = dm.carousel_compositor
         if compositor and compositor.poll() is None:

@@ -183,24 +183,30 @@ class _PanelLink:
             self.state = state
             self.dirty = True
 
-    def send(self, command: dict):
+    def send(self, command: dict) -> bool:
         if self._socket is None or self.state is None:
-            return
+            return False
         frame = json.dumps(command).encode() + b"\n"
         try:
             sent = self._socket.send(frame)
         except BlockingIOError:
             # Drop a live command when its controller cannot keep up.
-            return
+            return False
         except OSError:
             sent = 0
         if sent != len(frame):
             self.close()
+            return False
+        return True
 
 
 def _finite_number(value) -> bool:
     # Bound huge JSON integers before converting them to floats.
     return type(value) in (int, float) and abs(value) < 1e15 and math.isfinite(value)
+
+
+def _recent_command(issued_at, now: float) -> bool:
+    return _finite_number(issued_at) and now - 10 <= issued_at <= now + 5
 
 
 def _focus_command(payload: bytes, camera_ids: dict[str, str], now: float) -> dict | None:
@@ -210,6 +216,10 @@ def _focus_command(payload: bytes, camera_ids: dict[str, str], now: float) -> di
         return None
     if not isinstance(data, dict):
         return None
+    return _focus_command_from_data(data, camera_ids, now)
+
+
+def _focus_command_from_data(data: dict, camera_ids: dict[str, str], now: float) -> dict | None:
     camera_id = data.get("camera_id")
     duration = data.get("duration_seconds")
     request_id = data.get("request_id")
@@ -220,7 +230,7 @@ def _focus_command(payload: bytes, camera_ids: dict[str, str], now: float) -> di
         return None
     if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 128:
         return None
-    if not _finite_number(issued_at) or not now - 10 <= issued_at <= now + 5:
+    if not _recent_command(issued_at, now):
         return None
     return {
         "action": "focus",

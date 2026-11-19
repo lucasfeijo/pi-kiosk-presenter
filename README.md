@@ -570,6 +570,26 @@ sequence:
 The Pi uses its local timer for the return to the previous camera. Keep both
 hosts' clocks synchronized so the Pi can reject delayed focus requests.
 
+### Use Home Assistant's existing MQTT connection
+
+If the broker cannot grant the Pi its own topic-scoped account, Home Assistant
+can relay camera commands and state using its existing MQTT integration. Set
+`DISPLAY_CAMERA_API_TOKEN` to a random URL-safe token of at least 32 characters
+in the Pi's service environment file. The relay requires HTTPS and uses the
+display's existing listener.
+
+Copy `home_assistant_client.py` to the Home Assistant configuration directory and
+provide an adjacent `pi_display_connection.json` with the Pi's private `address`,
+HTTPS `port`, SHA-256 certificate `fingerprint` in lowercase hexadecimal, and
+the camera `token`. Protect the token as a secret. The client verifies the exact
+certificate before sending the token.
+
+Use `shell_command` to run the client with `state` or `command` followed by a
+base64-encoded JSON object. The camera state contains only panel and camera
+metadata. Forward the device's MQTT select and focus topics as camera commands,
+and publish the reported state and availability back through Home Assistant's
+MQTT integration. The direct MQTT client and this API run in separate modes.
+
 ## Configuration
 
 Environment variables (set in the systemd service or export before running):
